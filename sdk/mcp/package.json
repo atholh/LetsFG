@@ -1,6 +1,7 @@
 {
   "name": "boostedtravel-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "mcpName": "com.boostedchat/travel",
   "description": "BoostedTravel MCP Server — flight search & booking tools for Claude, Cursor, and any MCP-compatible AI agent.",
   "main": "dist/index.js",
   "bin": {
@@ -29,7 +30,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/boostedtravel/boostedtravel-mcp"
+    "url": "https://github.com/Boosted-Chat/BoostedTravel.git"
   },
   "devDependencies": {
     "tsup": "^8.0.0",

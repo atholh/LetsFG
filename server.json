@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.boostedchat/travel",
+  "title": "BoostedTravel",
+  "description": "Flight search & booking for AI agents. 400+ airlines, $20-50 cheaper than OTAs.",
+  "repository": {
+    "url": "https://github.com/Boosted-Chat/BoostedTravel",
+    "source": "github"
+  },
+  "version": "0.1.1",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.boostedchat.com/mcp",
+      "headers": [
+        {
+          "name": "X-API-Key",
+          "description": "BoostedTravel API key (get one free: npx boostedtravel-mcp or pip install boostedtravel && boostedtravel register)",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "boostedtravel-mcp",
+      "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "description": "Your BoostedTravel API key",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true,
+          "name": "BOOSTEDTRAVEL_API_KEY"
+        }
+      ]
+    }
+  ]
+}

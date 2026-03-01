@@ -1,5 +1,7 @@
 # BoostedTravel — Agent-Native Flight Search & Booking
 
+<!-- mcp-name: com.boostedchat/travel -->
+
 Search 400+ airlines at raw airline prices — **$20-50 cheaper** than Booking.com, Kayak, and other OTAs. Zero browser, zero markup, zero config. Built for autonomous AI agents.
 
 ## Install
