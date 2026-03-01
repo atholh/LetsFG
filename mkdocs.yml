@@ -1,0 +1,85 @@
+site_name: BoostedTravel Docs
+site_url: https://docs.boostedchat.com
+site_description: Agent-native flight search & booking API. 400+ airlines, straight from the terminal.
+site_author: Boosted Chat
+
+repo_name: Boosted-Chat/BoostedTravel
+repo_url: https://github.com/Boosted-Chat/BoostedTravel
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+    - content.code.annotate
+    - search.highlight
+    - search.suggest
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+  logo: assets/logo.svg
+  favicon: assets/favicon.png
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - API Guide: api-guide.md
+  - AI Agent Guide: agent-guide.md
+  - CLI Reference: cli-reference.md
+  - Packages: packages.md
+  - API Reference (Swagger): https://api.boostedchat.com/docs
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Boosted-Chat/BoostedTravel
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/boostedtravel/
+    - icon: fontawesome/brands/npm
+      link: https://www.npmjs.com/package/boostedtravel
+  generator: false
+
+copyright: "&copy; 2026 Boosted Chat. MIT License."
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+plugins:
+  - search
