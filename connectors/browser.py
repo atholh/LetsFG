@@ -22,6 +22,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# ── Cleanup registry — tracks resources launched by connectors ───────────────
+_launched_procs: list[subprocess.Popen] = []
+_launched_pw_instances: list = []
+
 # ── Chrome discovery ────────────────────────────────────────────────────────────
 
 _WIN_CANDIDATES = [
@@ -164,6 +168,7 @@ async def launch_cdp_chrome(
     ]
 
     proc = subprocess.Popen(args, **stealth_popen_kwargs())
+    _launched_procs.append(proc)
     await asyncio.sleep(startup_wait)
     logger.info("Chrome launched on CDP port %d (pid %d, visible=%s)",
                 port, proc.pid, _is_visible())
@@ -238,6 +243,7 @@ async def launch_headed_browser(
     args = [*stealth_args(), *(extra_args or [])]
 
     pw = await async_playwright().start()
+    _launched_pw_instances.append(pw)
     try:
         browser = await pw.chromium.launch(
             headless=False,
@@ -252,3 +258,124 @@ async def launch_headed_browser(
         )
     logger.info("Headed browser launched (channel=%s, visible=%s)", channel, _is_visible())
     return browser
+
+
+# ── Cleanup ─────────────────────────────────────────────────────────────────────
+
+async def cleanup_module_browsers(*modules) -> int:
+    """
+    Clean up browser resources stored in module-level globals.
+
+    Introspects each module for known global names (_browser, _chrome_proc,
+    _pw_instance, _nd_browser, _cdp_browser, _context, _warm_page) and
+    closes/terminates them.  Returns number of resources closed.
+    """
+    closed = 0
+    for mod in modules:
+        # Close Playwright browser context (easyjet)
+        ctx = getattr(mod, '_context', None)
+        if ctx:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+            mod._context = None
+            closed += 1
+
+        # Close warm page (flynas keepalive)
+        wp = getattr(mod, '_warm_page', None)
+        if wp:
+            try:
+                await wp.close()
+            except Exception:
+                pass
+            mod._warm_page = None
+            closed += 1
+
+        # Close primary Playwright browser
+        for attr in ('_browser', '_cdp_browser'):
+            browser = getattr(mod, attr, None)
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                setattr(mod, attr, None)
+                closed += 1
+
+        # Quit nodriver browser (twayair)
+        nd = getattr(mod, '_nd_browser', None)
+        if nd:
+            try:
+                nd.stop()
+            except Exception:
+                pass
+            mod._nd_browser = None
+            closed += 1
+
+        # Stop Playwright instances
+        pw = getattr(mod, '_pw_instance', None)
+        if pw:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
+            mod._pw_instance = None
+            closed += 1
+
+        # Terminate Chrome subprocess
+        proc = getattr(mod, '_chrome_proc', None)
+        if proc:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            mod._chrome_proc = None
+            closed += 1
+
+    return closed
+
+
+async def cleanup_all_browsers():
+    """
+    Terminate all Chrome processes and Playwright instances launched via
+    browser.py helper functions (launch_cdp_chrome, launch_headed_browser).
+
+    Only affects processes this module created — never touches the user's
+    own Chrome windows.
+    """
+    closed = 0
+
+    # Stop Playwright instances launched by launch_headed_browser / connect_cdp
+    for pw in _launched_pw_instances:
+        try:
+            await pw.stop()
+            closed += 1
+        except Exception:
+            pass
+    _launched_pw_instances.clear()
+
+    # Terminate Chrome subprocesses launched by launch_cdp_chrome
+    for proc in _launched_procs:
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=5)
+                closed += 1
+        except Exception:
+            try:
+                proc.kill()
+                closed += 1
+            except Exception:
+                pass
+    _launched_procs.clear()
+
+    if closed:
+        logger.info("browser.py cleanup: terminated %d browser resources", closed)
+
+    return closed

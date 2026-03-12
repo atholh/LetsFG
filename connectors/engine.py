@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import sys
 from typing import Optional
 
 import httpx
@@ -246,7 +247,16 @@ class MultiProvider:
 
         Everything fires at once via asyncio.gather. Total wall-clock time =
         max(backend_latency, slowest_local_connector) — typically 5-15s.
+
+        All browser instances launched by connectors are automatically
+        closed after results are collected.
         """
+        try:
+            return await self._search_flights_inner(req)
+        finally:
+            await self._cleanup_connectors()
+
+    async def _search_flights_inner(self, req: FlightSearchRequest) -> FlightSearchResponse:
         tasks = []
         providers_used = []
 
@@ -449,6 +459,41 @@ class MultiProvider:
             search_params={},
             source_tiers=source_tiers,
         )
+
+    # ── Browser cleanup ──────────────────────────────────────────────────────────
+
+    async def _cleanup_connectors(self):
+        """Close all browser instances launched by connectors during search.
+
+        Introspects module-level globals (_browser, _chrome_proc, _pw_instance,
+        _nd_browser etc.) in every imported connector module and terminates them.
+        Only affects processes we created — never kills the user's own Chrome.
+        """
+        from connectors.browser import cleanup_module_browsers, cleanup_all_browsers
+
+        modules_to_clean = []
+        seen = set()
+
+        # All direct airline connector modules
+        for _source, cls, _timeout in _DIRECT_AIRLINE_connectorS:
+            mod = sys.modules.get(cls.__module__)
+            if mod and id(mod) not in seen:
+                seen.add(id(mod))
+                modules_to_clean.append(mod)
+
+        # Ryanair, Wizzair, Kiwi connector modules
+        for mod_name in ('connectors.ryanair', 'connectors.wizzair', 'connectors.kiwi_connector'):
+            mod = sys.modules.get(mod_name)
+            if mod and id(mod) not in seen:
+                seen.add(id(mod))
+                modules_to_clean.append(mod)
+
+        per_mod = await cleanup_module_browsers(*modules_to_clean)
+        helper = await cleanup_all_browsers()
+        total = per_mod + helper
+        if total:
+            logger.info("Browser cleanup: closed %d resource(s) across %d modules",
+                        total, len(modules_to_clean))
 
     # ── Cloud Run backend (single HTTP call, fires all paid APIs in parallel on server) ──
 
