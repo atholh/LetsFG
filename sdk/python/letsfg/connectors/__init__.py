@@ -3,7 +3,7 @@ Airline connectors package — 73 production-grade airline integrations.
 
 Path shim: connector source files use bare imports like ``from connectors.X``
 and ``from models.X`` (shared with the standalone top-level directory).
-We add the ``boostedtravel/`` package root to sys.path so those imports
+We add the ``letsfg/`` package root to sys.path so those imports
 resolve to the copies shipped inside this package.
 """
 

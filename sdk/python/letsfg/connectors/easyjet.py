@@ -726,8 +726,17 @@ class EasyjetBookableConnector:
         pw = await async_playwright().start()
         browser = await pw.chromium.launch(
             headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--window-position=-2400,-2400",
+                "--window-size=1440,900",
+            ],
         )
+        _browser_pid = None
+        try:
+            _browser_pid = browser._impl_obj._browser_process.pid
+        except Exception:
+            pass
         context = await browser.new_context(
             viewport={"width": random.choice([1366, 1440, 1920]),
                        "height": random.choice([768, 900, 1080])},
@@ -995,6 +1004,24 @@ class EasyjetBookableConnector:
                 elapsed_seconds=time.monotonic() - t0,
             )
         finally:
-            await context.close()
-            await browser.close()
-            await pw.stop()
+            try:
+                await context.close()
+            except Exception:
+                pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
+            try:
+                await pw.stop()
+            except Exception:
+                pass
+            if _browser_pid:
+                try:
+                    import subprocess
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(_browser_pid)],
+                        capture_output=True, timeout=5,
+                    )
+                except Exception:
+                    pass

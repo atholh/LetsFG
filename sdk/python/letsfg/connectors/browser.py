@@ -1,5 +1,5 @@
 """
-Shared browser launcher for BoostedTravel connectors.
+Shared browser launcher for LetsFG connectors.
 
 Provides Chrome discovery, stealth CDP launch (off-screen, no-focus),
 and Playwright helpers. All CDP Chrome connectors should use these
@@ -8,7 +8,7 @@ instead of rolling their own launch logic.
 Environment variables:
     CHROME_PATH                — Override Chrome executable path.
     BOOSTED_BROWSER_VISIBLE    — Set to "1" to show browser windows (debugging).
-    BOOSTEDTRAVEL_MAX_BROWSERS — Max concurrent browser processes (default: auto-detect).
+    LETSFG_MAX_BROWSERS — Max concurrent browser processes (default: auto-detect).
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ def _resolve_max_browsers() -> int:
     global _max_concurrent_browsers
 
     # 1. Env var override (highest priority)
-    env_val = os.environ.get("BOOSTEDTRAVEL_MAX_BROWSERS")
+    env_val = os.environ.get("LETSFG_MAX_BROWSERS")
     if env_val:
         try:
             n = int(env_val)
@@ -50,7 +50,7 @@ def _resolve_max_browsers() -> int:
 
     # 3. Auto-detect from system resources
     try:
-        from boostedtravel.system_info import get_system_profile
+        from letsfg.system_info import get_system_profile
         profile = get_system_profile()
         recommended = profile["recommended_max_browsers"]
         logger.info(

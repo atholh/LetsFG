@@ -4,7 +4,7 @@ Base class for bookable airline connectors.
 Connectors that support automated checkout inherit from BookableConnector
 and implement `start_checkout()`.  This base class handles:
 
-  - Unlock token verification via the BoostedTravel backend ($1 paywall)
+  - Unlock token verification via the LetsFG backend
   - Common Playwright helpers (click, fill, screenshot, overlay dismissal)
   - Progress tracking through checkout steps
   - Dry-run safety (never submits payment)
@@ -133,7 +133,7 @@ def verify_checkout_token(
     base_url: str | None = None,
 ) -> dict:
     """
-    Verify a checkout unlock token with the BoostedTravel backend.
+    Verify a checkout unlock token with the LetsFG backend.
 
     The backend checks:
       - Token signature is valid (HMAC-SHA256, server-side secret)
@@ -144,7 +144,7 @@ def verify_checkout_token(
     Returns: {"valid": True, "offer_id": "...", "expires_at": "..."}
     Raises on failure.
     """
-    url = (base_url or os.environ.get("BOOSTEDTRAVEL_BASE_URL", _DEFAULT_API_URL)).rstrip("/")
+    url = (base_url or os.environ.get("LETSFG_BASE_URL", _DEFAULT_API_URL)).rstrip("/")
     body = json.dumps({"offer_id": offer_id, "token": token}).encode()
     req = Request(
         f"{url}/api/v1/bookings/verify-checkout",
@@ -190,7 +190,7 @@ async def dismiss_overlays(page) -> None:
             continue
 
 
-async def safe_click(page, selector: str, timeout: int = 10000, desc: str = "") -> bool:
+async def safe_click(page, selector: str, timeout: int = 2000, desc: str = "") -> bool:
     """Click an element safely — returns True if clicked, False if not found."""
     try:
         el = page.locator(selector).first
@@ -205,7 +205,30 @@ async def safe_click(page, selector: str, timeout: int = 10000, desc: str = "") 
         return False
 
 
-async def safe_fill(page, selector: str, value: str, timeout: int = 3000) -> bool:
+async def safe_click_first(page, selectors: list[str], timeout: int = 2000, desc: str = "") -> bool:
+    """Try multiple selectors simultaneously — click the first visible one within ONE timeout.
+
+    Uses Playwright's .or_() to collapse O(N*timeout) into O(timeout).
+    """
+    if not selectors:
+        return False
+    try:
+        combined = page.locator(selectors[0])
+        for sel in selectors[1:]:
+            combined = combined.or_(page.locator(sel))
+        el = combined.first
+        await el.wait_for(state="visible", timeout=timeout)
+        await el.scroll_into_view_if_needed()
+        await page.wait_for_timeout(random.randint(150, 400))
+        await el.click()
+        logger.debug("Clicked first of %d selectors (%s)", len(selectors), desc)
+        return True
+    except Exception as e:
+        logger.debug("None of %d selectors visible (%s): %s", len(selectors), desc, e)
+        return False
+
+
+async def safe_fill(page, selector: str, value: str, timeout: int = 1500) -> bool:
     """Fill an input safely — returns True if filled."""
     try:
         el = page.locator(selector).first
@@ -217,6 +240,26 @@ async def safe_fill(page, selector: str, value: str, timeout: int = 3000) -> boo
         return True
     except Exception as e:
         logger.debug("Could not fill %s: %s", selector, e)
+        return False
+
+
+async def safe_fill_first(page, selectors: list[str], value: str, timeout: int = 1500) -> bool:
+    """Try multiple input selectors simultaneously — fill the first visible one."""
+    if not selectors:
+        return False
+    try:
+        combined = page.locator(selectors[0])
+        for sel in selectors[1:]:
+            combined = combined.or_(page.locator(sel))
+        el = combined.first
+        await el.wait_for(state="visible", timeout=timeout)
+        await el.scroll_into_view_if_needed()
+        await page.wait_for_timeout(random.randint(100, 250))
+        await el.click()
+        await el.fill(value)
+        return True
+    except Exception as e:
+        logger.debug("None of %d input selectors matched: %s", len(selectors), e)
         return False
 
 
@@ -265,7 +308,7 @@ class BookableConnector:
             offer: The FlightOffer dict (must include id, booking_url, price, currency, outbound).
             passengers: Passenger details (use FAKE_PASSENGER for testing).
             checkout_token: Token from bt.unlock() — proves $1 was paid.
-            api_key: BoostedTravel API key for token verification.
+            api_key: LetsFG API key for token verification.
             base_url: Override API base URL.
 
         Returns:

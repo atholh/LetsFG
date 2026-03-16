@@ -43,7 +43,9 @@ from .booking_base import (
     FAKE_PASSENGER,
     dismiss_overlays,
     safe_click,
+    safe_click_first,
     safe_fill,
+    safe_fill_first,
     take_screenshot_b64,
     verify_checkout_token,
 )
@@ -63,7 +65,7 @@ class AirlineCheckoutConfig:
 
     # Pre-navigation
     homepage_url: str = ""             # Load this BEFORE booking URL (Kasada init, etc.)
-    homepage_wait_ms: int = 5000       # Wait after homepage load
+    homepage_wait_ms: int = 3000       # Wait after homepage load
     clear_storage_keep: list[str] = field(default_factory=list)  # localStorage prefixes to KEEP
 
     # Anti-bot
@@ -74,22 +76,25 @@ class AirlineCheckoutConfig:
     timezone: str = "Europe/London"
     timezone_pool: list[str] = field(default_factory=list)
 
-    # Cookie/overlay dismissal (tried in order)
+    # Cookie/overlay dismissal — scoped to cookie/consent containers to avoid clicking nav buttons
     cookie_selectors: list[str] = field(default_factory=lambda: [
-        "button:has-text('Accept')",
-        "button:has-text('Accept All')",
-        "button:has-text('Accept all cookies')",
-        "button:has-text('Agree')",
-        "button:has-text('Yes, I agree')",
-        "button:has-text('Got it')",
-        "button:has-text('OK')",
-        "[class*='cookie'] button",
+        "#onetrust-accept-btn-handler",
+        "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+        "[class*='cookie'] button:has-text('Accept')",
+        "[class*='cookie'] button:has-text('OK')",
+        "[class*='cookie'] button:has-text('Agree')",
         "[id*='cookie'] button",
+        "[class*='consent'] button:has-text('Accept')",
+        "[id*='consent'] button:has-text('Accept')",
+        "[class*='gdpr'] button",
+        "button:has-text('Accept all cookies')",
+        "button:has-text('Accept All Cookies')",
+        "button:has-text('Yes, I agree')",
     ])
 
     # Flight selection
     flight_cards_selector: str = "[data-ref*='flight-card'], flight-card, [class*='flight-card'], [data-test*='flight'], [class*='flight-select'], [class*='flight-row']"
-    flight_cards_timeout: int = 15000
+    flight_cards_timeout: int = 8000
     first_flight_selectors: list[str] = field(default_factory=lambda: [
         "flight-card:first-child",
         "[class*='flight-card']:first-child",
@@ -137,7 +142,7 @@ class AirlineCheckoutConfig:
 
     # Passenger form — name fields
     passenger_form_selector: str = "input[name*='name'], [class*='passenger-form'], [data-testid*='passenger'], pax-passenger"
-    passenger_form_timeout: int = 15000
+    passenger_form_timeout: int = 8000
 
     # Title: "dropdown" | "select" | "none"
     title_mode: str = "dropdown"
@@ -223,11 +228,14 @@ class AirlineCheckoutConfig:
 
     # Passenger continue button
     passenger_continue_selectors: list[str] = field(default_factory=lambda: [
-        "button:has-text('Continue')",
-        "button:has-text('Next')",
         "button[data-test='passengers-continue-btn']",
         "[data-test*='continue'] button",
         "[data-testid*='continue'] button",
+        "[class*='passenger'] button:has-text('Continue')",
+        "[class*='pax'] button:has-text('Continue')",
+        "form button[type='submit']",
+        "button:has-text('Continue to')",
+        "button:has-text('Next step')",
     ])
 
     # Wizzair-style extras on passengers page (baggage checkbox, PRM, etc.)
@@ -235,18 +243,19 @@ class AirlineCheckoutConfig:
     # Format: [{"action": "click"|"check"|"escape", "selectors": [...], "desc": "..."}]
 
     # Skip extras (bags, insurance, priority)
-    extras_rounds: int = 4  # How many times to try skipping
+    extras_rounds: int = 3  # How many times to try skipping
     extras_skip_selectors: list[str] = field(default_factory=lambda: [
         "button:has-text('Continue without')",
         "button:has-text('No thanks')",
         "button:has-text('No, thanks')",
         "button:has-text('OK, got it')",
-        "button:has-text('Continue')",
         "button:has-text('Not interested')",
-        "button:has-text('Skip')",
         "button:has-text('I don\\'t need')",
-        "button:has-text('Next')",
         "button:has-text('No hold luggage')",
+        "button:has-text('Skip to payment')",
+        "button:has-text('Continue to payment')",
+        "[data-test*='extras-skip'] button",
+        "[data-test*='continue-without'] button",
     ])
 
     # Skip seats
@@ -263,9 +272,10 @@ class AirlineCheckoutConfig:
         "[data-test*='seat-selection-decline']",
     ])
     seats_confirm_selectors: list[str] = field(default_factory=lambda: [
-        "button:has-text('OK')",
-        "button:has-text('Yes')",
-        "button:has-text('Continue')",
+        "[data-ref*='seats'] button:has-text('OK')",
+        "[class*='seat'] button:has-text('OK')",
+        "[class*='modal'] button:has-text('Yes')",
+        "[class*='dialog'] button:has-text('Continue')",
     ])
 
     # Price extraction on payment page
@@ -301,14 +311,15 @@ def _register(cfg: AirlineCheckoutConfig):
 _register(_base_cfg("Ryanair", "ryanair_direct",
     service_workers="block",
     disable_cache=True,
+    homepage_url="https://www.ryanair.com/gb/en",
+    homepage_wait_ms=3000,
     cookie_selectors=[
         "button[data-ref='cookie.accept-all']",
-        "button:has-text('Accept')",
-        "button:has-text('Agree')",
-        "button:has-text('Yes, I agree')",
-        "[class*='cookie'] button",
-        "button:has-text('Got it')",
-        "button:has-text('OK')",
+        "#cookie-preferences button:has-text('Accept')",
+        "#cookie-preferences button:has-text('Yes')",
+        "#cookie-preferences button",
+        "#onetrust-accept-btn-handler",
+        "[class*='cookie'] button:has-text('Accept')",
     ],
     flight_cards_selector="button.flight-card-summary__select-btn, button[data-ref='regular-price-select'], flight-card, [class*='flight-card']",
     first_flight_selectors=[
@@ -350,13 +361,9 @@ _register(_base_cfg("Wizz Air", "wizzair_api",
     timezone_pool=["Europe/Warsaw", "Europe/London", "Europe/Budapest"],
     cookie_selectors=[
         "button[data-test='cookie-policy-button-accept']",
-        "[class*='cookie'] button",
-        "button:has-text('Accept')",
-        "button:has-text('Got it')",
+        "[class*='cookie'] button:has-text('Accept')",
         "[data-test='modal-close']",
         "button[class*='close']",
-        "button:has-text('No, thanks')",
-        "button:has-text('Not now')",
     ],
     flight_cards_selector="[data-test*='flight'], [class*='flight-select'], [class*='flight-row']",
     flight_cards_timeout=20000,
@@ -551,7 +558,13 @@ _register(_base_cfg("Norwegian", "norwegian_api",
 ))
 
 _register(_base_cfg("Pegasus", "pegasus_direct",
-    flight_cards_selector="[class*='flight-detail'], [class*='flight-row']",
+    cookie_selectors=[
+        "#cookie-popup-with-overlay button:has-text('Accept')",
+        "#cookie-popup-with-overlay button",
+        "[class*='cookie-popup'] button:has-text('Accept')",
+        "[class*='cookie'] button",
+    ],
+    flight_cards_selector="[class*='flight-detail'], [class*='flight-row'], [class*='flight-list'] button",
     fare_selectors=[
         "button:has-text('Basic')",
         "button:has-text('Essentials')",
@@ -1325,6 +1338,7 @@ class GenericCheckoutEngine:
 
         # ── Launch browser ───────────────────────────────────────────
         from playwright.async_api import async_playwright
+        import subprocess as _sp
 
         pw = await async_playwright().start()
         launch_args = [
@@ -1333,6 +1347,22 @@ class GenericCheckoutEngine:
             "--window-size=1440,900",
         ]
         browser = await pw.chromium.launch(headless=headless, args=launch_args)
+
+        # Track browser PID for guaranteed cleanup on cancellation
+        _browser_pid = None
+        try:
+            _browser_pid = browser._impl_obj._browser_process.pid
+        except Exception:
+            pass
+
+        def _force_kill_browser():
+            """Synchronous kill — works even when asyncio is cancelled."""
+            if _browser_pid:
+                try:
+                    _sp.run(["taskkill", "/F", "/T", "/PID", str(_browser_pid)],
+                            capture_output=True, timeout=5)
+                except Exception:
+                    pass
 
         locale = random.choice(config.locale_pool) if config.locale_pool else config.locale
         tz = random.choice(config.timezone_pool) if config.timezone_pool else config.timezone
@@ -1396,8 +1426,8 @@ class GenericCheckoutEngine:
             # Guard against SPA redirects (e.g. Ryanair → check-in page)
             if booking_url.split("?")[0] not in page.url:
                 logger.warning("%s checkout: page redirected to %s — retrying", config.airline_name, page.url[:120])
-                await page.goto(booking_url, wait_until="networkidle", timeout=30000)
-                await page.wait_for_timeout(2000)
+                await page.goto(booking_url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(3000)
                 await self._dismiss_cookies(page, config)
 
             step = "page_loaded"
@@ -1428,7 +1458,7 @@ class GenericCheckoutEngine:
                     dep_time = dep[11:16]
                     try:
                         card = page.locator(f"text='{dep_time}'").first
-                        if await card.is_visible(timeout=3000):
+                        if await card.is_visible(timeout=2000):
                             # Try clicking parent flight card
                             if config.flight_ancestor_tag:
                                 try:
@@ -1444,9 +1474,7 @@ class GenericCheckoutEngine:
                         pass
 
             if not flight_clicked:
-                for sel in config.first_flight_selectors:
-                    if await safe_click(page, sel, timeout=3000, desc="first flight"):
-                        break
+                await safe_click_first(page, config.first_flight_selectors, timeout=3000, desc="first flight")
 
             await page.wait_for_timeout(1500)
             step = "flights_selected"
@@ -1466,21 +1494,16 @@ class GenericCheckoutEngine:
                         await safe_click(page, sel, timeout=2000, desc="fare loop")
                     await self._dismiss_cookies(page, config)
             else:
-                for sel in config.fare_selectors:
-                    if await safe_click(page, sel, timeout=2000, desc="select fare"):
-                        await page.wait_for_timeout(1000)
-                        for upsell in config.fare_upsell_decline:
-                            await safe_click(page, upsell, timeout=1500, desc="decline upsell")
-                        break
+                if await safe_click_first(page, config.fare_selectors, timeout=3000, desc="select fare"):
+                    await page.wait_for_timeout(1000)
+                    await safe_click_first(page, config.fare_upsell_decline, timeout=1500, desc="decline upsell")
 
             step = "fare_selected"
             await page.wait_for_timeout(1000)
             await self._dismiss_cookies(page, config)
 
             # ── Step 4: Skip login ───────────────────────────────────
-            for sel in config.login_skip_selectors:
-                if await safe_click(page, sel, timeout=5000, desc="skip login"):
-                    break
+            await safe_click_first(page, config.login_skip_selectors, timeout=2000, desc="skip login")
             await page.wait_for_timeout(1500)
             await self._dismiss_cookies(page, config)
             step = "login_bypassed"
@@ -1494,11 +1517,9 @@ class GenericCheckoutEngine:
             # Title
             title_text = "Mr" if pax.get("gender", "m") == "m" else "Ms"
             if config.title_mode == "dropdown":
-                for sel in config.title_dropdown_selectors:
-                    if await safe_click(page, sel, timeout=2000, desc="title dropdown"):
-                        await page.wait_for_timeout(500)
-                        await safe_click(page, f"button:has-text('{title_text}')", timeout=2000)
-                        break
+                if await safe_click_first(page, config.title_dropdown_selectors, timeout=2000, desc="title dropdown"):
+                    await page.wait_for_timeout(500)
+                    await safe_click(page, f"button:has-text('{title_text}')", timeout=2000)
             elif config.title_mode == "select":
                 try:
                     await page.select_option(config.title_select_selector, label=title_text, timeout=2000)
@@ -1506,22 +1527,16 @@ class GenericCheckoutEngine:
                     await safe_click(page, f"button:has-text('{title_text}')", timeout=1500, desc=f"title {title_text}")
 
             # First name
-            for sel in config.first_name_selectors:
-                if await safe_fill(page, sel, pax.get("given_name", "Test")):
-                    break
+            await safe_fill_first(page, config.first_name_selectors, pax.get("given_name", "Test"))
 
             # Last name
-            for sel in config.last_name_selectors:
-                if await safe_fill(page, sel, pax.get("family_name", "Traveler")):
-                    break
+            await safe_fill_first(page, config.last_name_selectors, pax.get("family_name", "Traveler"))
 
             # Gender (if required)
             if config.gender_enabled:
                 gender = pax.get("gender", "m")
                 sels = config.gender_selectors_male if gender == "m" else config.gender_selectors_female
-                for sel in sels:
-                    if await safe_click(page, sel, timeout=3000, desc=f"gender {gender}"):
-                        break
+                await safe_click_first(page, sels, timeout=2000, desc=f"gender {gender}")
 
             # Date of birth (if required)
             if config.dob_enabled:
@@ -1532,15 +1547,9 @@ class GenericCheckoutEngine:
                     if config.dob_strip_leading_zero:
                         day = day.lstrip("0") or day
                         month = month.lstrip("0") or month
-                    for sel in config.dob_day_selectors:
-                        if await safe_fill(page, sel, day):
-                            break
-                    for sel in config.dob_month_selectors:
-                        if await safe_fill(page, sel, month):
-                            break
-                    for sel in config.dob_year_selectors:
-                        if await safe_fill(page, sel, year):
-                            break
+                    await safe_fill_first(page, config.dob_day_selectors, day)
+                    await safe_fill_first(page, config.dob_month_selectors, month)
+                    await safe_fill_first(page, config.dob_year_selectors, year)
 
             # Nationality (if required)
             if config.nationality_enabled:
@@ -1554,14 +1563,10 @@ class GenericCheckoutEngine:
                         break
 
             # Email
-            for sel in config.email_selectors:
-                if await safe_fill(page, sel, pax.get("email", "test@example.com")):
-                    break
+            await safe_fill_first(page, config.email_selectors, pax.get("email", "test@example.com"))
 
             # Phone
-            for sel in config.phone_selectors:
-                if await safe_fill(page, sel, pax.get("phone_number", "+441234567890")):
-                    break
+            await safe_fill_first(page, config.phone_selectors, pax.get("phone_number", "+441234567890"))
 
             step = "passengers_filled"
 
@@ -1571,9 +1576,7 @@ class GenericCheckoutEngine:
                 sels = hook.get("selectors", [])
                 desc = hook.get("desc", "")
                 if action == "click":
-                    for sel in sels:
-                        if await safe_click(page, sel, timeout=3000, desc=desc):
-                            break
+                    await safe_click_first(page, sels, timeout=2000, desc=desc)
                 elif action == "escape":
                     for sel in sels:
                         try:
@@ -1585,34 +1588,47 @@ class GenericCheckoutEngine:
                     for sel in sels:
                         try:
                             el = page.locator(sel).first
-                            if await el.is_visible(timeout=2000):
+                            if await el.is_visible(timeout=1500):
                                 await el.check()
                         except Exception:
                             pass
 
             # Continue past passengers
-            for sel in config.passenger_continue_selectors:
-                if await safe_click(page, sel, timeout=2000, desc="continue after passengers"):
-                    break
+            await safe_click_first(page, config.passenger_continue_selectors, timeout=2000, desc="continue after passengers")
             await page.wait_for_timeout(1500)
             await self._dismiss_cookies(page, config)
 
             # ── Step 6: Skip extras ──────────────────────────────────
-            for _ in range(config.extras_rounds):
+            for _round in range(config.extras_rounds):
                 await self._dismiss_cookies(page, config)
+                # Fast combined probe: any extras button visible?
+                if not config.extras_skip_selectors:
+                    break
+                combined = page.locator(config.extras_skip_selectors[0])
+                for sel in config.extras_skip_selectors[1:]:
+                    combined = combined.or_(page.locator(sel))
+                try:
+                    if not await combined.first.is_visible(timeout=1500):
+                        break  # No extras buttons, bail all rounds
+                except Exception:
+                    break
+                # Something visible — click each matching selector individually
                 for sel in config.extras_skip_selectors:
-                    await safe_click(page, sel, timeout=2000, desc="skip extras")
+                    try:
+                        el = page.locator(sel).first
+                        if await el.is_visible(timeout=300):
+                            await el.click()
+                            await page.wait_for_timeout(300)
+                    except Exception:
+                        pass
                 await page.wait_for_timeout(1000)
 
             step = "extras_skipped"
 
             # ── Step 7: Skip seats ───────────────────────────────────
-            for sel in config.seats_skip_selectors:
-                if await safe_click(page, sel, timeout=2000, desc="skip seats"):
-                    break
+            await safe_click_first(page, config.seats_skip_selectors, timeout=2000, desc="skip seats")
             await page.wait_for_timeout(1000)
-            for sel in config.seats_confirm_selectors:
-                await safe_click(page, sel, timeout=2000, desc="confirm skip seats")
+            await safe_click_first(page, config.seats_confirm_selectors, timeout=1500, desc="confirm skip seats")
 
             step = "seats_skipped"
             await page.wait_for_timeout(1000)
@@ -1678,17 +1694,45 @@ class GenericCheckoutEngine:
                 elapsed_seconds=time.monotonic() - t0,
             )
         finally:
-            await context.close()
-            await browser.close()
-            await pw.stop()
+            # Graceful close, then force-kill as fallback
+            try:
+                await context.close()
+            except Exception:
+                pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
+            try:
+                await pw.stop()
+            except Exception:
+                pass
+            # Synchronous kill — guarantees browser dies even on CancelledError
+            _force_kill_browser()
 
     async def _dismiss_cookies(self, page, config: AirlineCheckoutConfig) -> None:
-        """Dismiss cookie banners using airline-specific selectors."""
-        for selector in config.cookie_selectors:
-            try:
-                btn = page.locator(selector).first
-                if await btn.is_visible(timeout=600):
-                    await btn.click()
-                    await page.wait_for_timeout(300)
-            except Exception:
-                continue
+        """Dismiss cookie banners using airline-specific selectors (fast combined check)."""
+        if not config.cookie_selectors:
+            return
+        try:
+            combined = page.locator(config.cookie_selectors[0])
+            for sel in config.cookie_selectors[1:]:
+                combined = combined.or_(page.locator(sel))
+            btn = combined.first
+            if await btn.is_visible(timeout=800):
+                await btn.click(force=True)
+                await page.wait_for_timeout(500)
+        except Exception:
+            pass
+        # Fallback: remove any remaining blocking overlays via JS
+        try:
+            await page.evaluate("""() => {
+                for (const sel of ['#cookie-preferences', '#onetrust-consent-sdk',
+                    '#CybotCookiebotDialog', '[class*="cookie-popup"]',
+                    '[class*="cookie-overlay"]', '[class*="consent-banner"]']) {
+                    const el = document.querySelector(sel);
+                    if (el) el.remove();
+                }
+            }""")
+        except Exception:
+            pass
