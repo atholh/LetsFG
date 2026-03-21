@@ -110,7 +110,9 @@ from connectors.airbaltic import AirbalticConnectorClient
 from connectors.aircanada import AirCanadaConnectorClient
 from connectors.airindia import AirIndiaConnectorClient
 from connectors.airnewzealand import AirNewZealandConnectorClient
+from connectors.aerolineas import AerolineasConnectorClient
 from connectors.arajet import ArajetConnectorClient
+from connectors.chinaairlines import ChinaAirlinesConnectorClient
 from connectors.egyptair import EgyptAirConnectorClient
 from connectors.ethiopian import EthiopianConnectorClient
 from connectors.finnair import FinnairConnectorClient
@@ -127,6 +129,7 @@ from connectors.royalairmaroc import RoyalAirMarocConnectorClient
 from connectors.saa import SouthAfricanAirwaysConnectorClient
 from connectors.sas import SASConnectorClient
 from connectors.skyairline import SkyAirlineConnectorClient
+from connectors.skyexpress import SkyExpressConnectorClient
 from connectors.tap import TapConnectorClient
 from connectors.wingo import WingoConnectorClient
 from connectors.klm import KlmConnectorClient
@@ -143,6 +146,20 @@ from connectors.elal import ElAlConnectorClient
 from connectors.saudia import SaudiaConnectorClient
 from connectors.omanair import OmanairConnectorClient
 from connectors.britishairways import BritishAirwaysConnectorClient
+from connectors.evaair import EvaAirConnectorClient
+from connectors.airchina import AirChinaConnectorClient
+from connectors.chinaeastern import ChinaEasternConnectorClient
+from connectors.chinasouthern import ChinaSouthernConnectorClient
+from connectors.vietnamairlines import VietnamAirlinesConnectorClient
+from connectors.asiana import AsianaConnectorClient
+from connectors.airtransat import AirTransatConnectorClient
+from connectors.airserbia import AirSerbiaConnectorClient
+from connectors.aireuropa import AirEuropaConnectorClient
+from connectors.mea import MEAConnectorClient
+from connectors.hainan import HainanConnectorClient
+from connectors.royaljordanian import RoyalJordanianConnectorClient
+from connectors.kuwaitairways import KuwaitAirwaysConnectorClient
+from connectors.level import LevelConnectorClient
 
 from models.flights import AirlineSummary, FlightOffer, FlightSearchRequest, FlightSearchResponse
 
@@ -183,7 +200,13 @@ _BROWSER_SOURCES: set[str] = {
     "kenyaairways_direct", "philippineairlines_direct", "qantas_direct",
     "royalairmaroc_direct", "saa_direct", "sas_direct",
     "skyairline_direct", "tap_direct", "wingo_direct", "flyarystan_direct",
-    "elal_direct", "saudia_direct", "omanair_direct",
+    "aerolineas_direct", "chinaairlines_direct",
+    "elal_direct", "saudia_direct",
+    "airchina_direct", "chinaeastern_direct", "chinasouthern_direct",
+    "vietnamairlines_direct", "asiana_direct", "airtransat_direct",
+    "airserbia_direct", "aireuropa_direct", "mea_direct",
+    "hainan_direct", "royaljordanian_direct", "kuwaitairways_direct",
+    "level_direct",
 }
 
 
@@ -317,8 +340,11 @@ _DIRECT_AIRLINE_connectorS: list[tuple[str, type, float]] = [
     ("saa_direct", SouthAfricanAirwaysConnectorClient, 45.0),
     ("sas_direct", SASConnectorClient, 25.0),
     ("skyairline_direct", SkyAirlineConnectorClient, 45.0),
+    ("skyexpress_direct", SkyExpressConnectorClient, 20.0),
     ("tap_direct", TapConnectorClient, 45.0),
     ("flyarystan_direct", FlyArystanConnectorClient, 45.0),
+    ("aerolineas_direct", AerolineasConnectorClient, 45.0),
+    ("chinaairlines_direct", ChinaAirlinesConnectorClient, 35.0),
     ("wingo_direct", WingoConnectorClient, 45.0),
     ("klm_direct", KlmConnectorClient, 25.0),
     ("airfrance_direct", AirfranceConnectorClient, 25.0),
@@ -334,9 +360,26 @@ _DIRECT_AIRLINE_connectorS: list[tuple[str, type, float]] = [
     # ── Middle East Playwright connectors (CDP Chrome + form fill) ──
     ("elal_direct", ElAlConnectorClient, 55.0),
     ("saudia_direct", SaudiaConnectorClient, 55.0),
-    ("omanair_direct", OmanairConnectorClient, 55.0),
+    # ── Oman Air (EveryMundo sputnik API — no browser) ──
+    ("omanair_direct", OmanairConnectorClient, 25.0),
     # ── British Airways (SOLR pricing feed via curl_cffi) ──
     ("britishairways_direct", BritishAirwaysConnectorClient, 25.0),
+    # ── EVA Air (EveryMundo __NEXT_DATA__ via curl_cffi) ──
+    ("evaair_direct", EvaAirConnectorClient, 25.0),
+    # ── CDP Chrome browser connectors (Batch 5/6/7 — form fill + API intercept) ──
+    ("airchina_direct", AirChinaConnectorClient, 55.0),
+    ("chinaeastern_direct", ChinaEasternConnectorClient, 55.0),
+    ("chinasouthern_direct", ChinaSouthernConnectorClient, 55.0),
+    ("vietnamairlines_direct", VietnamAirlinesConnectorClient, 55.0),
+    ("asiana_direct", AsianaConnectorClient, 55.0),
+    ("airtransat_direct", AirTransatConnectorClient, 55.0),
+    ("airserbia_direct", AirSerbiaConnectorClient, 55.0),
+    ("aireuropa_direct", AirEuropaConnectorClient, 55.0),
+    ("mea_direct", MEAConnectorClient, 55.0),
+    ("hainan_direct", HainanConnectorClient, 55.0),
+    ("royaljordanian_direct", RoyalJordanianConnectorClient, 55.0),
+    ("kuwaitairways_direct", KuwaitAirwaysConnectorClient, 55.0),
+    ("level_direct", LevelConnectorClient, 55.0),
 ]
 
 

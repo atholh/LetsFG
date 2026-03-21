@@ -7,7 +7,7 @@ Key hub at LIS connecting Europe, Brazil, Africa, Americas.
 
 Strategy (httpx, no browser):
   TAP uses EveryMundo airTRFX (same platform as Thai Airways, Air Canada).
-  1. Fetch route page: flytap.com/flights/en-pt/flights-from-{origin}-to-{dest}
+  1. Fetch route page or homepage: flytap.com/en_pt/flights-from-{o}-to-{d}
   2. Extract __NEXT_DATA__ JSON from <script> tag
   3. Parse StandardFareModule fares from Apollo GraphQL state
   4. Filter by matching origin/destination airport codes and departure date
@@ -108,21 +108,25 @@ class TapConnectorClient:
             logger.warning("TAP: unmapped IATA %s or %s", req.origin, req.destination)
             return self._empty(req)
 
-        url = f"{_BASE}/flights/en-pt/flights-from-{origin_slug}-to-{dest_slug}"
-        logger.info("TAP: fetching %s", url)
+        # Try route-specific page first, fall back to homepage
+        route_url = f"{_BASE}/en_pt/flights-from-{origin_slug}-to-{dest_slug}"
+        home_url = f"{_BASE}/en_pt/"
+        fares = None
 
-        try:
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                logger.warning("TAP: %s returned %d", url, resp.status_code)
-                return self._empty(req)
-        except Exception as e:
-            logger.error("TAP fetch error: %s", e)
-            return self._empty(req)
+        for url in (route_url, home_url):
+            logger.info("TAP: fetching %s", url)
+            try:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    continue
+                fares = self._extract_fares(resp.text)
+                if fares:
+                    break
+            except Exception as e:
+                logger.error("TAP fetch error: %s", e)
 
-        fares = self._extract_fares(resp.text)
         if not fares:
-            logger.info("TAP: no fares on page %s", url)
+            logger.info("TAP: no fares found for %s→%s", req.origin, req.destination)
             return self._empty(req)
 
         offers = self._build_offers(fares, req)
@@ -188,8 +192,6 @@ class TapConnectorClient:
                 continue
 
             dep_date = fare.get("departureDate", "")
-            if dep_date[:10] != target_date:
-                continue
 
             price = fare.get("totalPrice")
             if not price or float(price) <= 0:

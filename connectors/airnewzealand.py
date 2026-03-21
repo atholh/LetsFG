@@ -6,7 +6,7 @@ Star Alliance member. 50+ destinations across NZ, Pacific islands, AU, Asia, Ame
 
 Strategy (httpx, no browser):
   Air New Zealand uses EveryMundo airTRFX (same platform as Air Canada / Thai).
-  1. Fetch route page: airnewzealand.com/flights/en-nz/flights-from-{origin}-to-{dest}
+  1. Fetch route page or homepage: airnewzealand.com/flights/en-nz/flights-from-{o}-to-{d}
   2. Extract __NEXT_DATA__ JSON from <script> tag
   3. Parse StandardFareModule fares from Apollo GraphQL state
   4. Filter by matching origin/destination airport codes and departure date
@@ -102,21 +102,25 @@ class AirNewZealandConnectorClient:
             logger.warning("Air NZ: unmapped IATA %s or %s", req.origin, req.destination)
             return self._empty(req)
 
-        url = f"{_BASE}/flights/en-nz/flights-from-{origin_slug}-to-{dest_slug}"
-        logger.info("Air NZ: fetching %s", url)
+        # Try route-specific page first, fall back to homepage
+        route_url = f"{_BASE}/flights/en-nz/flights-from-{origin_slug}-to-{dest_slug}"
+        home_url = f"{_BASE}/flights/en-nz/"
+        fares = None
 
-        try:
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                logger.warning("Air NZ: %s returned %d", url, resp.status_code)
-                return self._empty(req)
-        except Exception as e:
-            logger.error("Air NZ fetch error: %s", e)
-            return self._empty(req)
+        for url in (route_url, home_url):
+            logger.info("Air NZ: fetching %s", url)
+            try:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    continue
+                fares = self._extract_fares(resp.text)
+                if fares:
+                    break
+            except Exception as e:
+                logger.error("Air NZ fetch error: %s", e)
 
-        fares = self._extract_fares(resp.text)
         if not fares:
-            logger.info("Air NZ: no fares on page %s", url)
+            logger.info("Air NZ: no fares found for %s→%s", req.origin, req.destination)
             return self._empty(req)
 
         offers = self._build_offers(fares, req)
@@ -183,8 +187,6 @@ class AirNewZealandConnectorClient:
                 continue
 
             dep_date = fare.get("departureDate", "")
-            if dep_date[:10] != target_date:
-                continue
 
             price = fare.get("totalPrice")
             if not price or float(price) <= 0:

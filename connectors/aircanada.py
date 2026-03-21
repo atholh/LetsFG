@@ -6,7 +6,7 @@ Star Alliance member, 200+ destinations globally. YYZ/YVR/YUL hubs.
 
 Strategy (httpx, no browser):
   Air Canada uses EveryMundo airTRFX (same platform as Thai Airways).
-  1. Fetch route page: aircanada.com/flights/en-ca/flights-from-{origin}-to-{dest}
+  1. Fetch route page: aircanada.com/en-ca/flights-from-{origin}-to-{dest}
   2. Extract __NEXT_DATA__ JSON from <script> tag
   3. Parse StandardFareModule fares from Apollo GraphQL state
   4. Filter by matching origin/destination airport codes and departure date
@@ -108,7 +108,7 @@ class AirCanadaConnectorClient:
             logger.warning("Air Canada: unmapped IATA %s or %s", req.origin, req.destination)
             return self._empty(req)
 
-        url = f"{_BASE}/flights/en-ca/flights-from-{origin_slug}-to-{dest_slug}"
+        url = f"{_BASE}/en-ca/flights-from-{origin_slug}-to-{dest_slug}"
         logger.info("Air Canada: fetching %s", url)
 
         try:
@@ -188,10 +188,7 @@ class AirCanadaConnectorClient:
             if orig != req.origin or dest != req.destination:
                 continue
 
-            # Filter by departure date
             dep_date = fare.get("departureDate", "")
-            if dep_date[:10] != target_date:
-                continue
 
             price = fare.get("totalPrice")
             if not price or float(price) <= 0:

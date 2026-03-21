@@ -196,8 +196,6 @@ class AegeanConnectorClient:
                 continue
 
             dep_date = fare.get("departureDate", "")
-            if dep_date[:10] != target_date:
-                continue
 
             price = fare.get("totalPrice")
             if not price or float(price) <= 0:

@@ -566,6 +566,17 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
     "skyairline": {
         "CL", "PE", "AR", "BR", "CO", "UY",
     },
+    "skyexpress": {
+        "GR", "CY", "TR", "DE", "FR", "IT", "BE", "NL", "AT", "CZ",
+        "HU", "PL", "GB", "IE", "AL", "AM", "GE",
+    },
+    "aerolineas": {
+        "AR", "BR", "CL", "UY", "PY", "BO", "PE", "EC", "CO", "VE",
+        "US", "MX", "CU", "DO", "ES", "IT",
+    },
+    "chinaairlines": {
+        "US", "TW", "VN", "PH",
+    },
     "flyarystan": {
         "KZ", "TR", "GE", "KG", "AE", "AZ", "UZ", "CN", "IN",
     },
@@ -695,6 +706,109 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
         "IN", "PK", "BD", "LK", "MY", "TH", "ID", "PH",
         "EG", "JO", "TZ", "KE", "ET",
         "CN",
+    },
+    # ── EVA Air (EveryMundo __NEXT_DATA__ — Star Alliance, TPE hub) ──
+    "evaair": {
+        "TW", "JP", "KR", "CN", "HK", "MO",
+        "SG", "TH", "VN", "PH", "MY", "ID", "KH", "MM",
+        "IN", "BD",
+        "US", "CA",
+        "GB", "FR", "NL", "AT", "IT",
+        "AU", "NZ",
+        "AE",
+    },
+    # ── CDP Chrome browser connectors (Batch 5/6/7) ──
+    "airchina": {
+        "CN", "HK", "MO", "TW",
+        "JP", "KR", "TH", "SG", "MY", "VN", "KH", "MM", "ID", "PH", "IN", "BD", "LK", "NP", "PK",
+        "US", "CA", "AU",
+        "GB", "FR", "DE", "IT", "ES", "RU", "SE", "DK", "GR", "AT", "CH", "NL", "BE", "HU", "PL",
+        "AE", "EG", "ET", "KE", "ZA", "BR", "AR", "MX", "PE", "CU",
+    },
+    "chinaeastern": {
+        "CN", "HK", "MO", "TW",
+        "JP", "KR", "TH", "SG", "MY", "VN", "KH", "ID", "PH", "IN", "BD", "LK", "NP", "MM",
+        "US", "CA", "AU", "NZ",
+        "GB", "FR", "DE", "IT", "ES", "RU", "NL", "CZ",
+        "AE", "EG", "ET", "KE",
+    },
+    "chinasouthern": {
+        "CN", "HK", "MO", "TW",
+        "JP", "KR", "TH", "SG", "MY", "VN", "KH", "ID", "PH", "IN", "BD", "LK", "NP", "PK", "MM",
+        "US", "CA", "AU", "NZ",
+        "GB", "FR", "DE", "IT", "ES", "RU", "NL", "TR",
+        "AE", "EG", "ET", "KE", "NG", "ZA",
+    },
+    "vietnamairlines": {
+        "VN",
+        "JP", "KR", "TW", "CN", "HK", "TH", "SG", "MY", "KH", "LA", "MM", "ID", "PH", "IN",
+        "US", "AU",
+        "GB", "FR", "DE", "RU",
+    },
+    "asiana": {
+        "KR",
+        "JP", "CN", "HK", "TW", "TH", "SG", "VN", "KH", "PH", "MY", "ID", "IN", "UZ",
+        "US", "CA",
+        "GB", "FR", "DE", "IT", "ES", "TR", "HR", "CZ", "RU",
+        "AU",
+    },
+    "airtransat": {
+        "CA",
+        "US",
+        "GB", "FR", "ES", "PT", "IT", "GR", "NL", "BE", "CH", "IE",
+        "MX", "CU", "DO", "JM", "HT", "CR", "PA", "CO", "SV", "HN",
+    },
+    "airserbia": {
+        "RS",
+        "DE", "FR", "IT", "ES", "GB", "NL", "BE", "CH", "AT", "GR", "HR", "SI", "ME", "BA",
+        "MK", "AL", "BG", "RO", "HU", "CZ", "PL", "SE", "NO", "DK",
+        "TR", "CY", "EG", "TN",
+        "US",
+        "RU",
+    },
+    "aireuropa": {
+        "ES",
+        "FR", "IT", "PT", "DE", "GB", "NL", "BE", "CH", "AT", "GR", "HR", "BG", "RO",
+        "IL", "MA", "TN", "SN", "GM",
+        "US",
+        "MX", "CU", "DO", "CO", "EC", "PE", "BR", "AR", "UY", "PY", "BO", "VE", "PA", "CR", "HN", "SV",
+    },
+    "mea": {
+        "LB",
+        "AE", "SA", "KW", "QA", "BH", "OM", "JO", "IQ", "EG", "CY",
+        "GB", "FR", "DE", "IT", "ES", "BE", "CH", "GR", "DK", "SE", "TR",
+        "GH", "NG", "CI", "SN", "ET",
+        "US", "CA", "BR",
+    },
+    "hainan": {
+        "CN", "HK", "MO", "TW",
+        "JP", "KR", "TH", "SG", "MY", "VN", "ID", "PH", "IN",
+        "US", "CA", "AU",
+        "GB", "FR", "DE", "IT", "ES", "RU", "BE", "CH", "AT", "CZ", "NO", "IE",
+        "AE", "EG", "IL", "ET", "KE",
+        "MX",
+    },
+    "royaljordanian": {
+        "JO",
+        "AE", "SA", "KW", "QA", "BH", "OM", "IQ", "LB", "EG", "SD",
+        "GB", "FR", "DE", "IT", "ES", "NL", "CH", "AT", "GR", "CY", "TR", "RO",
+        "US", "CA",
+        "TH", "MY", "IN", "LK", "CN", "HK",
+        "NG", "ET", "KE",
+    },
+    "kuwaitairways": {
+        "KW",
+        "AE", "SA", "BH", "QA", "OM", "JO", "LB", "IQ", "EG", "IR",
+        "GB", "FR", "DE", "IT", "ES", "CH", "GR", "TR", "GE",
+        "US",
+        "IN", "PK", "BD", "LK", "TH", "MY", "PH", "SG", "CN",
+        "ET", "KE", "NG",
+    },
+    "level": {
+        "ES",
+        "FR", "IT", "PT", "DE", "GB", "NL", "AT", "GR",
+        "US",
+        "AR", "CL", "BR",
     },
 }
 

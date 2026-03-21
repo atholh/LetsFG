@@ -1,24 +1,20 @@
 """
-Sky Airline connector — EveryMundo airTRFX fare pages.
+Sky Airline connector — real-time search via farequoting API.
 
 Sky Airline (IATA: H2) is Chile's largest low-cost carrier.
 Operates 45+ domestic and regional routes from SCL hub.
 Destinations in Chile, Peru, Argentina, Brazil, Uruguay.
 
 Strategy (httpx, no browser):
-  Sky Airline uses EveryMundo airTRFX at skyairline.com/flights/.
-  1. Fetch route page: skyairline.com/flights/en/flights-from-{o}-to-{d}
-  2. Extract __NEXT_DATA__ JSON from <script> tag
-  3. Parse StandardFareModule fares from Apollo GraphQL state
-  4. Filter by origin/destination airport codes and departure date
+  1. POST api.skyairline.com/farequoting/v1/search/flight?stage=IS
+  2. Parse branded fare results from itineraryParts
+  3. Each flight has segments with times + brandOffers with prices
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import re
 import time
 from datetime import datetime
 from typing import Optional
@@ -35,44 +31,22 @@ from models.flights import (
 
 logger = logging.getLogger(__name__)
 
-_BASE = "https://www.skyairline.com"
+_SEARCH_URL = "https://api.skyairline.com/farequoting/v1/search/flight?stage=IS"
+_SUBSCRIPTION_KEY = "4c998b33d2aa4e8aba0f9a63d4c04d7d"
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
-
-_IATA_TO_SLUG: dict[str, str] = {
-    # Chile
-    "SCL": "santiago", "ANF": "antofagasta", "ARI": "arica",
-    "IQQ": "iquique", "CJC": "calama", "CCP": "concepcion",
-    "PMC": "puerto-montt", "ZOS": "osorno", "ZAL": "valdivia",
-    "LSC": "la-serena", "CPO": "copiapo", "BBA": "balmaceda",
-    "PUQ": "punta-arenas", "GXQ": "coyhaique",
-    "WCA": "castro", "FTE": "el-calafate",
-    # Peru
-    "LIM": "lima", "CUZ": "cusco", "AQP": "arequipa",
-    "IQT": "iquitos", "PIU": "piura", "TRU": "trujillo",
-    "TPP": "tarapoto", "JUL": "juliaca", "AYP": "ayacucho",
-    "TCQ": "tacna", "CIX": "chiclayo", "JAU": "jauja",
-    # Argentina
-    "EZE": "buenos-aires", "BRC": "bariloche",
-    "MDZ": "mendoza", "COR": "cordoba",
-    # Brazil
-    "GRU": "sao-paulo", "FLN": "florianopolis",
-    "CNF": "belo-horizonte", "BSB": "brasilia",
-    # Uruguay
-    "MVD": "montevideo",
-    # Other
-    "CUN": "cancun", "MIA": "miami",
+    "Content-Type": "application/json",
+    "Ocp-Apim-Subscription-Key": _SUBSCRIPTION_KEY,
+    "channel": "WEB",
+    "homemarket": "CL",
 }
 
 
 class SkyAirlineConnectorClient:
-    """Sky Airline Chile — EveryMundo airTRFX fare pages."""
+    """Sky Airline Chile — real-time farequoting search API (httpx)."""
 
     def __init__(self, timeout: float = 25.0):
         self.timeout = timeout
@@ -93,30 +67,37 @@ class SkyAirlineConnectorClient:
         t0 = time.monotonic()
         client = await self._client()
 
-        origin_slug = _IATA_TO_SLUG.get(req.origin)
-        dest_slug = _IATA_TO_SLUG.get(req.destination)
-        if not origin_slug or not dest_slug:
-            logger.warning("Sky Airline: unmapped IATA %s or %s", req.origin, req.destination)
-            return self._empty(req)
-
-        url = f"{_BASE}/flights/en/flights-from-{origin_slug}-to-{dest_slug}"
-        logger.info("Sky Airline: fetching %s", url)
+        payload = {
+            "cabinClass": "Economy",
+            "currency": None,
+            "awardBooking": False,
+            "pointOfSale": "CL",
+            "searchType": "BRANDED",
+            "itineraryParts": [{
+                "origin": {"code": req.origin, "useNearbyLocations": False},
+                "destination": {"code": req.destination, "useNearbyLocations": False},
+                "departureDate": {"date": req.date_from.strftime("%Y-%m-%d")},
+                "selectedOfferRef": None,
+                "plusMinusDays": None,
+            }],
+            "passengers": {
+                "ADT": req.adults or 1,
+                "CHD": req.children or 0,
+                "INF": req.infants or 0,
+            },
+        }
 
         try:
-            resp = await client.get(url)
+            resp = await client.post(_SEARCH_URL, json=payload)
             if resp.status_code != 200:
-                logger.warning("Sky Airline: %s returned %d", url, resp.status_code)
+                logger.warning("Sky Airline API: %d %s", resp.status_code, resp.text[:200])
                 return self._empty(req)
+            data = resp.json()
         except Exception as e:
-            logger.error("Sky Airline fetch error: %s", e)
+            logger.error("Sky Airline API error: %s", e)
             return self._empty(req)
 
-        fares = self._extract_fares(resp.text)
-        if not fares:
-            logger.info("Sky Airline: no fares on page %s", url)
-            return self._empty(req)
-
-        offers = self._build_offers(fares, req)
+        offers = self._parse(data, req)
         offers.sort(key=lambda o: o.price if o.price > 0 else float("inf"))
 
         elapsed = time.monotonic() - t0
@@ -127,114 +108,109 @@ class SkyAirlineConnectorClient:
             search_id=f"fs_{h}",
             origin=req.origin,
             destination=req.destination,
-            currency=offers[0].currency if offers else "USD",
+            currency=offers[0].currency if offers else "CLP",
             offers=offers,
             total_results=len(offers),
         )
 
     @staticmethod
-    def _extract_fares(html: str) -> list[dict]:
-        m = re.search(
-            r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
-            html,
-            re.S,
-        )
-        if not m:
-            return []
-        try:
-            nd = json.loads(m.group(1))
-        except (json.JSONDecodeError, ValueError):
-            return []
-
-        apollo = (
-            nd.get("props", {})
-            .get("pageProps", {})
-            .get("apolloState", {})
-            .get("data", {})
-        )
-        if not apollo:
-            return []
-
-        all_fares: list[dict] = []
-        for v in apollo.values():
-            if not isinstance(v, dict) or v.get("__typename") != "StandardFareModule":
-                continue
-            for f in v.get("fares", []):
-                if isinstance(f, dict) and "__ref" in f:
-                    ref_data = apollo.get(f["__ref"])
-                    if ref_data and isinstance(ref_data, dict):
-                        all_fares.append(ref_data)
-                elif isinstance(f, dict):
-                    all_fares.append(f)
-        return all_fares
-
-    def _build_offers(self, fares: list[dict], req: FlightSearchRequest) -> list[FlightOffer]:
-        target_date = req.date_from.strftime("%Y-%m-%d")
+    def _parse(data: dict, req: FlightSearchRequest) -> list[FlightOffer]:
         offers: list[FlightOffer] = []
+        parts = data.get("itineraryParts", [])
+        if not parts:
+            return offers
 
-        for fare in fares:
-            orig = fare.get("originAirportCode", "")
-            dest = fare.get("destinationAirportCode", "")
-            if orig != req.origin or dest != req.destination:
+        # Part 0 = outbound flights
+        outbound = parts[0] if isinstance(parts[0], list) else []
+        target_date = req.date_from.strftime("%Y-%m-%d")
+
+        for flight in outbound:
+            if not isinstance(flight, dict):
                 continue
 
-            dep_date = fare.get("departureDate", "")
-            if dep_date[:10] != target_date:
-                continue
+            segments_data = flight.get("segments", [])
+            brand_offers = flight.get("fares", [])
+            stops = flight.get("stops", 0)
+            total_dur = flight.get("totalDuration", 0)
 
-            price = fare.get("totalPrice")
-            if not price or float(price) <= 0:
-                continue
+            # Build segments
+            segments: list[FlightSegment] = []
+            for seg in segments_data:
+                fl = seg.get("flight", {})
+                dep_str = seg.get("departure", "")
+                arr_str = seg.get("arrival", "")
 
-            currency = fare.get("currencyCode") or "USD"
-            price_f = round(float(price), 2)
-
-            dep_dt = datetime(2000, 1, 1)
-            if dep_date:
+                dep_dt = datetime(2000, 1, 1)
+                arr_dt = datetime(2000, 1, 1)
                 try:
-                    dep_dt = datetime.strptime(dep_date[:10], "%Y-%m-%d")
-                except ValueError:
+                    dep_dt = datetime.fromisoformat(dep_str)
+                except (ValueError, TypeError):
+                    pass
+                try:
+                    arr_dt = datetime.fromisoformat(arr_str)
+                except (ValueError, TypeError):
                     pass
 
-            cabin = (fare.get("formattedTravelClass") or "Economy").lower()
-            seg = FlightSegment(
-                airline="H2",
-                airline_name="Sky Airline",
-                flight_no="",
-                origin=req.origin,
-                destination=req.destination,
-                origin_city=fare.get("originCity", ""),
-                destination_city=fare.get("destinationCity", ""),
-                departure=dep_dt,
-                arrival=dep_dt,
-                duration_seconds=0,
-                cabin_class=cabin,
+                segments.append(FlightSegment(
+                    airline=fl.get("airlineCode", "H2"),
+                    airline_name="Sky Airline",
+                    flight_no=f"H2{fl.get('flightNumber', '')}",
+                    origin=seg.get("origin", {}).get("code", "") if isinstance(seg.get("origin"), dict) else seg.get("origin", ""),
+                    destination=seg.get("destination", {}).get("code", "") if isinstance(seg.get("destination"), dict) else seg.get("destination", ""),
+                    departure=dep_dt,
+                    arrival=arr_dt,
+                    duration_seconds=seg.get("duration", 0) * 60,
+                    cabin_class=seg.get("cabinClass", "Economy"),
+                ))
+
+            if not segments:
+                continue
+
+            route = FlightRoute(
+                segments=segments,
+                total_duration_seconds=total_dur * 60,
+                stopovers=stops,
             )
-            route = FlightRoute(segments=[seg], total_duration_seconds=0, stopovers=0)
 
-            fid = hashlib.md5(
-                f"h2_{orig}{dest}{dep_date}{price_f}{cabin}".encode()
-            ).hexdigest()[:12]
+            # Each fare brand (ZO, LT, ED, MF, PL) is a separate offer
+            for fare in brand_offers:
+                pax_prices = fare.get("priceByPassengerTypes", [])
+                if not pax_prices:
+                    continue
+                fare_info = pax_prices[0].get("fare", {})
+                amount = fare_info.get("amount")
+                currency = fare_info.get("currency", "CLP")
+                if not amount or float(amount) <= 0:
+                    continue
 
-            offers.append(FlightOffer(
-                id=f"h2_{fid}",
-                price=price_f,
-                currency=currency,
-                price_formatted=fare.get("formattedTotalPrice") or f"{price_f:.2f} {currency}",
-                outbound=route,
-                inbound=None,
-                airlines=["Sky Airline"],
-                owner_airline="H2",
-                booking_url=(
-                    f"https://booking.skyairline.com/search/"
-                    f"?origin={req.origin}&destination={req.destination}"
-                    f"&date={target_date}"
-                    f"&adults={req.adults or 1}&tripType=O"
-                ),
-                is_locked=False,
-                source="skyairline_direct",
-                source_tier="free",
-            ))
+                price_f = round(float(amount), 2)
+                brand_id = fare.get("brandId", "")
+
+                fid = hashlib.md5(
+                    f"h2_{req.origin}{req.destination}{dep_str}{brand_id}{price_f}".encode()
+                ).hexdigest()[:12]
+
+                offers.append(FlightOffer(
+                    id=f"h2_{fid}",
+                    price=price_f,
+                    currency=currency,
+                    price_formatted=f"{price_f:,.0f} {currency}",
+                    outbound=route,
+                    inbound=None,
+                    airlines=["Sky Airline"],
+                    owner_airline="H2",
+                    conditions={"fare_brand": brand_id},
+                    booking_url=(
+                        f"https://initial-sale.skyairline.com/es/chile"
+                        f"?origin={req.origin}&destination={req.destination}"
+                        f"&departureDate={target_date}"
+                        f"&ADT={req.adults or 1}&CHD={req.children or 0}&INF={req.infants or 0}"
+                        f"&flightType=OW"
+                    ),
+                    is_locked=False,
+                    source="skyairline_direct",
+                    source_tier="free",
+                ))
 
         return offers
 
@@ -244,7 +220,7 @@ class SkyAirlineConnectorClient:
             search_id=f"fs_{h}",
             origin=req.origin,
             destination=req.destination,
-            currency="USD",
+            currency="CLP",
             offers=[],
             total_results=0,
         )
