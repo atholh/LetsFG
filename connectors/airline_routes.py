@@ -729,6 +729,13 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
     },
     # ── Airnorth (.NET B2C — northern Australia + Dili) ──
     "airnorth": {"AU", "TL"},
+    # ── I Want That Flight (AU aggregator — domestic + international from AU) ──
+    "iwantthatflight": {
+        "AU", "NZ", "FJ", "NC", "PF", "PG", "VU", "WS", "TO",
+        "SG", "MY", "TH", "ID", "VN", "KH", "PH", "JP", "KR", "CN", "HK", "TW", "IN",
+        "AE", "QA", "US", "GB", "FR", "DE", "IT", "ES", "NL",
+        "CL", "MV", "LK",
+    },
     # ── CDP Chrome browser connectors (Batch 5/6/7) ──
     "airchina": {
         "CN", "HK", "MO", "TW",

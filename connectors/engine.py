@@ -163,6 +163,7 @@ from connectors.hainan import HainanConnectorClient
 from connectors.royaljordanian import RoyalJordanianConnectorClient
 from connectors.kuwaitairways import KuwaitAirwaysConnectorClient
 from connectors.level import LevelConnectorClient
+from connectors.iwantthatflight import IWantThatFlightConnectorClient
 
 from models.flights import AirlineSummary, FlightOffer, FlightSearchRequest, FlightSearchResponse
 
@@ -375,6 +376,8 @@ _DIRECT_AIRLINE_connectorS: list[tuple[str, type, float]] = [
     ("fijiairways_direct", FijiAirwaysConnectorClient, 25.0),
     # ── Airnorth (.NET B2C form POST via curl_cffi) ──
     ("airnorth_direct", AirnorthConnectorClient, 30.0),
+    # ── I Want That Flight (AU fare aggregator — HTML scraping) ──
+    ("iwantthatflight_direct", IWantThatFlightConnectorClient, 20.0),
     # ── CDP Chrome browser connectors (Batch 5/6/7 — form fill + API intercept) ──
     ("airchina_direct", AirChinaConnectorClient, 55.0),
     ("chinaeastern_direct", ChinaEasternConnectorClient, 55.0),
