@@ -116,9 +116,8 @@ class ElAlConnectorClient:
     def _build_payload(self, req):
         outbound = _as_date(req.date_from)
         inbound = _as_date(req.return_from) if req.return_from else None
-        today = date.today()
-        start = min(today, outbound)
-        end = max(inbound or outbound, start + timedelta(days=90))
+        start = outbound - timedelta(days=1)
+        end = inbound + timedelta(days=3) if inbound else outbound + timedelta(days=3)
 
         return {
             "markets": ["US", "IL"],

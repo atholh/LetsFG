@@ -146,7 +146,9 @@ class FlyArystanConnectorClient:
         offers: list[FlightOffer] = []
 
         async with lock:
-            await acquire_browser_slot()
+            # NOTE: Do NOT acquire_browser_slot here — the engine already
+            # acquires the semaphore in _search_connector_generic before
+            # calling this method.  Double-acquiring wastes a slot.
             try:
                 page = await _ensure_session()
                 if page:
@@ -155,8 +157,6 @@ class FlyArystanConnectorClient:
                         offers = self._build_offers(data, req)
             except Exception as exc:
                 logger.warning("FlyArystan search failed for %s->%s: %s", req.origin, req.destination, exc)
-            finally:
-                release_browser_slot()
 
         offers.sort(key=lambda o: o.price if o.price > 0 else float("inf"))
         elapsed = time.monotonic() - t0

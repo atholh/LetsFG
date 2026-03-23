@@ -161,6 +161,13 @@ def build_combos(
             inbound=rt.outbound,  # return leg's outbound becomes our inbound
             airlines=all_airlines,
             owner_airline="|".join(all_airlines),
+            conditions={
+                "combo_type": "virtual_interlining",
+                "outbound_booking_url": ob.booking_url or "",
+                "inbound_booking_url": rt.booking_url or "",
+                "outbound_source": ob.source,
+                "inbound_source": rt.source,
+            },
             booking_url="",
             is_locked=False,
             source=f"combo:{ob.source}+{rt.source}",

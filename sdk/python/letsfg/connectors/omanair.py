@@ -79,8 +79,8 @@ class OmanairConnectorClient:
             "origins": [req.origin],
             "destinations": [req.destination],
             "departureDaysInterval": {
-                "min": max(0, days_from_now - 3),
-                "max": days_from_now + 30,
+                "min": max(0, days_from_now - 1),
+                "max": days_from_now + 3,
             },
             "journeyType": "ONE_WAY",
         }
@@ -88,6 +88,12 @@ class OmanairConnectorClient:
         fares = await self._call_sputnik(payload)
         offers = [
             o for o in (self._build_offer(f, req) for f in fares) if o is not None
+        ]
+        # Filter: only keep offers within ±1 day of the requested date
+        offers = [
+            o for o in offers
+            if o.outbound and o.outbound.segments
+            and abs((o.outbound.segments[0].departure.date() - dt).days) <= 1
         ]
         offers.sort(key=lambda o: o.price)
 

@@ -177,7 +177,9 @@ class AerolineasConnectorClient:
         lock = await _get_lock()
 
         async with lock:
-            await acquire_browser_slot()
+            # NOTE: Do NOT acquire_browser_slot here — the engine already
+            # acquires the semaphore in _search_connector_generic before
+            # calling this method.  Double-acquiring wastes a slot.
             try:
                 page = await _ensure_session()
                 if page:
@@ -186,8 +188,6 @@ class AerolineasConnectorClient:
                         offers = self._build_offers(data, req)
             except Exception as exc:
                 logger.warning("Aerolíneas search failed for %s->%s: %s", req.origin, req.destination, exc)
-            finally:
-                release_browser_slot()
 
         offers.sort(key=lambda offer: offer.price if offer.price > 0 else float("inf"))
         logger.info(

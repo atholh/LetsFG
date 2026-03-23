@@ -96,13 +96,22 @@ async def _get_browser_semaphore() -> asyncio.Semaphore:
 async def acquire_browser_slot():
     """Acquire a browser slot — blocks if too many browsers are running."""
     sem = await _get_browser_semaphore()
+    max_val = _resolve_max_browsers()
+    # _value is the internal counter: how many more can acquire without blocking
+    available = getattr(sem, '_value', '?')
+    logger.debug("Browser slot ACQUIRE requested (available=%s/%d)", available, max_val)
     await sem.acquire()
+    available = getattr(sem, '_value', '?')
+    logger.debug("Browser slot ACQUIRED (available now=%s/%d)", available, max_val)
 
 
 def release_browser_slot():
     """Release a browser slot after a connector finishes with its browser."""
     if _browser_semaphore is not None:
         _browser_semaphore.release()
+        available = getattr(_browser_semaphore, '_value', '?')
+        max_val = _max_concurrent_browsers or '?'
+        logger.debug("Browser slot RELEASED (available now=%s/%s)", available, max_val)
 
 
 # ── Cleanup registry — tracks resources launched by connectors ───────────────

@@ -1,32 +1,36 @@
 """
-IndiGo direct scraper — uses Playwright to scrape flight data.
+IndiGo direct scraper — uses real Chrome via CDP to scrape flight data.
 
 IndiGo (IATA: 6E) is India's largest airline by market share.
 Website: www.goindigo.in — custom React SPA with Module Federation micro-frontends.
 
 Strategy:
-1. Navigate to goindigo.in homepage
-2. Dismiss cookie/session banners
-3. Fill search form (From/To/Departure, One Way)
-4. Intercept flight search API via page.route() + route.fetch()
-5. Parse JSON → FlightOffer objects
+1. Launch real Chrome subprocess + connect via CDP (bypasses Akamai)
+2. Navigate to goindigo.in homepage
+3. Dismiss cookie/session banners
+4. Fill search form (From/To/Departure, One Way)
+5. Intercept flight search API via CDP Fetch.enable (requestStage: Response)
+6. Parse JSON → FlightOffer objects
 
 Key technical details:
 - API endpoint: api-prod-flight-skyplus6e.goindigo.in/v1/flight/search (POST)
-- page.on("response") cannot see cross-origin API calls from micro-frontends
-- page.route() + route.fetch() intercepts at the Playwright proxy level
-- Akamai Bot Manager protects the API; may return 403 on some requests
-- response is text/plain with JSON body (728KB+ for popular routes)
+- Akamai Bot Manager protects the API; Playwright launch_persistent_context is detected
+- Real Chrome subprocess with CDP connection avoids Akamai detection
+- CDP Fetch.enable intercepts responses while letting browser handle requests naturally
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import json as _json
 import logging
 import os
+import platform
 import random
 import re
+import subprocess
 import time
 from datetime import datetime
 from typing import Any, Optional
@@ -41,62 +45,162 @@ from ..models.flights import (
 
 logger = logging.getLogger(__name__)
 
-_VIEWPORTS = [
-    {"width": 1366, "height": 768},
-    {"width": 1440, "height": 900},
-    {"width": 1536, "height": 864},
-    {"width": 1920, "height": 1080},
-    {"width": 1280, "height": 720},
-    {"width": 1600, "height": 900},
-]
-_LOCALES = ["en-IN", "en-US", "en-GB"]
-_TIMEZONES = [
-    "Asia/Kolkata", "Asia/Dubai", "Europe/London",
-    "Asia/Singapore", "Asia/Bangkok",
+# ── Chrome flags matching MCP/Pegasus pattern (Akamai-safe) ────────────
+_CHROME_FLAGS = [
+    "--disable-field-trial-config",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-back-forward-cache",
+    "--disable-breakpad",
+    "--disable-client-side-phishing-detection",
+    "--disable-component-extensions-with-background-pages",
+    "--disable-component-update",
+    "--no-default-browser-check",
+    "--disable-default-apps",
+    "--disable-dev-shm-usage",
+    "--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,"
+    "BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,"
+    "DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,"
+    "MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,"
+    "AutoDeElevate,RenderDocument,OptimizationHints,AutomationControlled",
+    "--enable-features=CDPScreenshotNewSurface",
+    "--allow-pre-commit-input",
+    "--disable-hang-monitor",
+    "--disable-ipc-flooding-protection",
+    "--disable-popup-blocking",
+    "--disable-prompt-on-repost",
+    "--disable-renderer-backgrounding",
+    "--force-color-profile=srgb",
+    "--metrics-recording-only",
+    "--no-first-run",
+    "--password-store=basic",
+    "--no-service-autorun",
+    "--disable-search-engine-choice-screen",
+    "--disable-infobars",
+    "--disable-sync",
+    "--enable-unsafe-swiftshader",
+    "--window-position=-2400,-2400",
+    "--window-size=1440,900",
 ]
 
-# ── Shared browser context (headed Chrome, persistent) ──────────────────
-_ctx = None
-_ctx_lock: Optional[asyncio.Lock] = None
+# ── Shared CDP Chrome state ────────────────────────────────────────────
+_CDP_PORT = 9473
+_USER_DATA_DIR = os.path.join(
+    os.environ.get("TEMP", "/tmp"), "chrome-cdp-indigo"
+)
+_chrome_proc: Optional[subprocess.Popen] = None
+_browser = None
+_pw_instance = None
+_browser_lock: Optional[asyncio.Lock] = None
 
 
 def _get_lock() -> asyncio.Lock:
-    global _ctx_lock
-    if _ctx_lock is None:
-        _ctx_lock = asyncio.Lock()
-    return _ctx_lock
+    global _browser_lock
+    if _browser_lock is None:
+        _browser_lock = asyncio.Lock()
+    return _browser_lock
 
 
-async def _get_context():
-    """Launch a persistent headed-Chrome context (reused across searches)."""
-    global _ctx
+async def _get_browser():
+    """Launch real Chrome via CDP (no Playwright automation flags)."""
+    global _chrome_proc, _browser, _pw_instance
     lock = _get_lock()
     async with lock:
-        if _ctx and _ctx.browser:
-            return _ctx
+        if _browser:
+            try:
+                if _browser.is_connected():
+                    return _browser
+            except Exception:
+                pass
+            _browser = None
+
         from playwright.async_api import async_playwright
-        pw = await async_playwright().start()
-        user_data = os.path.join(os.environ.get("TEMP", "/tmp"), "chrome-indigo-ctx")
-        os.makedirs(user_data, exist_ok=True)
-        vp = random.choice(_VIEWPORTS)
-        _ctx = await pw.chromium.launch_persistent_context(
-            user_data, channel="chrome", headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--window-position=-2400,-2400",
-                f"--window-size={vp['width']},{vp['height']}",
-            ],
-            viewport=vp,
-            locale=random.choice(_LOCALES),
-            timezone_id=random.choice(_TIMEZONES),
-            service_workers="block",
+
+        if _pw_instance:
+            try:
+                await _pw_instance.stop()
+            except Exception:
+                pass
+
+        _pw_instance = await async_playwright().start()
+
+        # Try connecting to existing Chrome first
+        try:
+            _browser = await _pw_instance.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{_CDP_PORT}"
+            )
+            logger.info("IndiGo: connected to existing Chrome on port %d", _CDP_PORT)
+            return _browser
+        except Exception:
+            pass
+
+        # Launch real Chrome subprocess
+        from connectors.browser import find_chrome
+
+        chrome = find_chrome()
+        os.makedirs(_USER_DATA_DIR, exist_ok=True)
+
+        args = [
+            chrome,
+            f"--remote-debugging-port={_CDP_PORT}",
+            f"--user-data-dir={_USER_DATA_DIR}",
+            *_CHROME_FLAGS,
+            "about:blank",
+        ]
+
+        popen_kw: dict = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if platform.system() == "Windows":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 7  # SW_SHOWMINNOACTIVE
+            popen_kw["startupinfo"] = si
+            popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        _chrome_proc = subprocess.Popen(args, **popen_kw)
+        await asyncio.sleep(2.5)
+
+        _browser = await _pw_instance.chromium.connect_over_cdp(
+            f"http://127.0.0.1:{_CDP_PORT}"
         )
-        logger.info("IndiGo: headed Chrome context ready")
-        return _ctx
+        logger.info(
+            "IndiGo: Chrome ready via CDP (port %d, pid %d)",
+            _CDP_PORT,
+            _chrome_proc.pid,
+        )
+        return _browser
+
+
+async def _reset_browser():
+    """Close browser + Chrome process (called after persistent failures)."""
+    global _browser, _chrome_proc, _pw_instance
+    lock = _get_lock()
+    async with lock:
+        if _browser:
+            try:
+                await _browser.close()
+            except Exception:
+                pass
+            _browser = None
+        if _chrome_proc:
+            try:
+                _chrome_proc.terminate()
+            except Exception:
+                pass
+            _chrome_proc = None
+        if _pw_instance:
+            try:
+                await _pw_instance.stop()
+            except Exception:
+                pass
+            _pw_instance = None
 
 
 class IndiGoConnectorClient:
-    """IndiGo Playwright scraper — React SPA form search + API interception."""
+    """IndiGo scraper — real Chrome via CDP + Fetch interception."""
 
     def __init__(self, timeout: float = 45.0):
         self.timeout = timeout
@@ -117,48 +221,63 @@ class IndiGoConnectorClient:
 
     async def _try_search(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
-        context = await _get_context()
+        browser = await _get_browser()
+        ctx = browser.contexts[0]
+
+        page = await ctx.new_page()
 
         try:
-            page = await context.new_page()
+            # Set up CDP Fetch interception for the flight search API response.
+            # Unlike page.route() + route.fetch(), this lets the browser send
+            # the request naturally (with Akamai cookies) while we read the
+            # response body through CDP.
+            cdp = await page.context.new_cdp_session(page)
 
             captured_data: dict = {}
             api_event = asyncio.Event()
-            import json as _json
 
-            # Intercept the flight search API at the Playwright proxy level.
-            # page.on("response") can't see this cross-origin API call, but
-            # page.route() + route.fetch() intercepts at the proxy layer.
-            async def _intercept_flight(route):
-                if route.request.method == "OPTIONS":
-                    await route.continue_()
-                    return
-                try:
-                    resp = await route.fetch()
-                    body = await resp.text()
-                    if resp.status == 200 and body.strip():
-                        data = _json.loads(body)
-                        if isinstance(data, dict) and "data" in data:
-                            captured_data["json"] = data["data"]
-                        else:
-                            captured_data["json"] = data
-                        logger.info("IndiGo: captured flight/search API (%d bytes)", len(body))
-                        api_event.set()
-                    else:
-                        logger.warning("IndiGo: API returned status %d (Akamai may be blocking)", resp.status)
-                    await route.fulfill(
-                        status=resp.status,
-                        headers=resp.headers,
-                        body=body,
-                    )
-                except Exception as exc:
-                    logger.debug("IndiGo route intercept error: %s", exc)
+            await cdp.send("Fetch.enable", {
+                "patterns": [
+                    {"urlPattern": "*api-prod-flight*search*", "requestStage": "Response"},
+                    {"urlPattern": "*v1/flight/search*", "requestStage": "Response"},
+                ],
+                "handleAuthRequests": False,
+            })
+
+            def _on_fetch_paused(params):
+                req_id = params.get("requestId")
+                status = params.get("responseStatusCode", 0)
+                url = params.get("request", {}).get("url", "")
+
+                async def _handle():
                     try:
-                        await route.continue_()
-                    except Exception:
-                        pass
+                        if status == 200:
+                            body_result = await cdp.send("Fetch.getResponseBody", {"requestId": req_id})
+                            body = body_result.get("body", "")
+                            if body_result.get("base64Encoded"):
+                                body = base64.b64decode(body).decode("utf-8", errors="replace")
+                            if body.strip():
+                                data = _json.loads(body)
+                                if isinstance(data, dict) and "data" in data:
+                                    captured_data["json"] = data["data"]
+                                else:
+                                    captured_data["json"] = data
+                                logger.info("IndiGo: captured flight/search API (%d bytes)", len(body))
+                                api_event.set()
+                        elif status == 403:
+                            logger.warning("IndiGo: API returned 403 (Akamai blocking)")
+                        # Let the browser continue processing the response
+                        await cdp.send("Fetch.continueResponse", {"requestId": req_id})
+                    except Exception as exc:
+                        logger.debug("IndiGo CDP fetch error: %s", exc)
+                        try:
+                            await cdp.send("Fetch.continueResponse", {"requestId": req_id})
+                        except Exception:
+                            pass
 
-            await page.route("**/v1/flight/search**", _intercept_flight)
+                asyncio.ensure_future(_handle())
+
+            cdp.on("Fetch.requestPaused", _on_fetch_paused)
 
             logger.info("IndiGo: loading homepage for %s->%s", req.origin, req.destination)
             await page.goto(
@@ -172,6 +291,13 @@ class IndiGoConnectorClient:
             await asyncio.sleep(0.5)
             await self._dismiss_cookies(page)
 
+            # Mouse movements to build Akamai sensor data
+            for _ in range(3):
+                x = random.randint(200, 1000)
+                y = random.randint(100, 500)
+                await page.mouse.move(x, y, steps=random.randint(5, 10))
+                await asyncio.sleep(random.uniform(0.2, 0.5))
+
             # Select One Way trip type
             await self._set_one_way(page)
             await asyncio.sleep(0.5)
@@ -183,7 +309,7 @@ class IndiGoConnectorClient:
                 return self._empty(req)
             await asyncio.sleep(0.5)
 
-            # Fill destination - IndiGo uses "Going to?" placeholder
+            # Fill destination
             ok = await self._fill_airport_field(page, "To", req.destination, 1)
             if not ok:
                 logger.warning("IndiGo: destination fill failed")
@@ -200,7 +326,7 @@ class IndiGoConnectorClient:
             # Click search
             await self._click_search(page)
 
-            # Wait for the flight search API response via route interceptor
+            # Wait for the flight search API response via CDP Fetch interceptor
             remaining = max(self.timeout - (time.monotonic() - t0), 15)
             try:
                 await asyncio.wait_for(api_event.wait(), timeout=remaining)
@@ -222,6 +348,8 @@ class IndiGoConnectorClient:
 
         except Exception as e:
             logger.error("IndiGo Playwright error: %s", e)
+            if "closed" in str(e).lower() or "target" in str(e).lower() or "disconnected" in str(e).lower():
+                await _reset_browser()
             return self._empty(req)
         finally:
             try:

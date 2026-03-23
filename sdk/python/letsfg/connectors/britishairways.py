@@ -22,7 +22,7 @@ import hashlib
 import json
 import logging
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from curl_cffi import requests as creq
@@ -114,8 +114,13 @@ class BritishAirwaysConnectorClient:
         self, dep_city: str, arr_city: str, req: FlightSearchRequest,
     ) -> list[FlightOffer]:
         """Query BA SOLR for one-way pricing data."""
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        future_iso = f"{req.date_from.year + 1}-{req.date_from.month:02d}-01T00:00:00Z"
+        # Narrow to ±7 days around the requested date so we get date-specific fares
+        # instead of cheapest-across-all-months calendar data.
+        target = req.date_from if isinstance(req.date_from, date) else req.date_from.date()
+        start_dt = target - timedelta(days=1)
+        end_dt = target + timedelta(days=7)
+        start_iso = f"{start_dt}T00:00:00Z"
+        end_iso = f"{end_dt}T23:59:59Z"
 
         fq = (
             f"departure_city:{dep_city}+AND+"
@@ -123,7 +128,7 @@ class BritishAirwaysConnectorClient:
             f"arrival_city:{arr_city}+AND+"
             f"trip_type:OW+AND+"
             f"cabin:M+AND+"
-            f"outbound_date:[{now_iso}+TO+{future_iso}]"
+            f"outbound_date:[{start_iso}+TO+{end_iso}]"
         )
 
         url = (
