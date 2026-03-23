@@ -970,6 +970,23 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
     "transnusa": {
         "ID", "MY", "CN",
     },
+    # ── EveryMundo airTRFX connectors (batch 3) ──
+    "caribbeanairlines": {
+        "TT", "JM", "BB", "GD", "LC", "VC", "DM", "CW", "BS", "SX",
+        "GP", "MQ", "CU", "GY", "SR", "US", "CA",
+    },
+    "rwandair": {
+        "RW", "KE", "UG", "TZ", "BI", "SS", "ET", "ZA", "ZW", "ZM",
+        "MZ", "NG", "GH", "CI", "SN", "CM", "CG", "CD", "GA", "AO",
+        "FR", "GB", "BE", "NL", "PL", "AE", "QA", "IN", "CN",
+    },
+    "airseychelles": {
+        "SC", "KE", "TZ", "ET", "ZA", "MU", "MG", "RE", "AE",
+        "IN", "LK", "TH", "MY", "MV", "FR", "IT", "IL",
+    },
+    "airgreenland": {
+        "GL", "DK", "IS",
+    },
 }
 
 

@@ -194,6 +194,10 @@ from .samoaairways import SamoaAirwaysConnectorClient
 from .solomonairlines import SolomonAirlinesConnectorClient
 from .superairjet import SuperAirJetConnectorClient
 from .transnusa import TransNusaConnectorClient
+from .caribbeanairlines import CaribbeanAirlinesConnectorClient
+from .rwandair import RwandAirConnectorClient
+from .airseychelles import AirSeychellesConnectorClient
+from .airgreenland import AirGreenlandConnectorClient
 
 from ..models.flights import AirlineSummary, FlightOffer, FlightSearchRequest, FlightSearchResponse
 
@@ -468,6 +472,14 @@ _DIRECT_AIRLINE_connectorS: list[tuple[str, type, float]] = [
     ("solomonairlines_direct", SolomonAirlinesConnectorClient, 25.0),
     ("superairjet_direct", SuperAirJetConnectorClient, 45.0),
     ("transnusa_direct", TransNusaConnectorClient, 45.0),
+    # ── Caribbean Airlines (EveryMundo __NEXT_DATA__ via curl_cffi) ──
+    ("caribbeanairlines_direct", CaribbeanAirlinesConnectorClient, 25.0),
+    # ── RwandAir (EveryMundo __NEXT_DATA__ via curl_cffi) ──
+    ("rwandair_direct", RwandAirConnectorClient, 25.0),
+    # ── Air Seychelles (EveryMundo __NEXT_DATA__ via curl_cffi) ──
+    ("airseychelles_direct", AirSeychellesConnectorClient, 25.0),
+    # ── Air Greenland (EveryMundo __NEXT_DATA__ via curl_cffi) ──
+    ("airgreenland_direct", AirGreenlandConnectorClient, 25.0),
 ]
 
 
