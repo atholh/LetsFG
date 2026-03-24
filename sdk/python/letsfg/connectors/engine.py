@@ -78,6 +78,7 @@ from .twayair import TwayAirConnectorClient
 from .porter import PorterConnectorClient
 from .nokair import NokAirConnectorClient
 from .airpeace import AirPeaceConnectorClient
+from .pia import PiaConnectorClient
 from .airindiaexpress import AirIndiaExpressConnectorClient
 from .batikair import BatikAirConnectorClient
 from .luckyair import LuckyAirConnectorClient
@@ -182,6 +183,7 @@ from .opodo import OpodoConnectorClient
 from .momondo import MomondoConnectorClient
 from .kayak import KayakConnectorClient
 from .cheapflights import CheapflightsConnectorClient
+from .skyscanner import SkyscannerConnectorClient
 from .avianca import AviancaConnectorClient
 from .copa import CopaConnectorClient
 from .latam import LatamConnectorClient
@@ -244,7 +246,7 @@ _BROWSER_SOURCES: set[str] = {
     "airnewzealand_direct", "ethiopian_direct", "finnair_direct",
     "kenyaairways_direct", "philippineairlines_direct", "qantas_direct",
     "royalairmaroc_direct", "saa_direct", "sas_direct",
-    "skyairline_direct", "tap_direct", "wingo_direct", "flyarystan_direct",
+    "skyairline_direct", "tap_direct", "wingo_direct",
     "aerolineas_direct", "chinaairlines_direct",
     "elal_direct", "saudia_direct",
     "airchina_direct", "chinaeastern_direct", "chinasouthern_direct",
@@ -265,6 +267,7 @@ _BROWSER_SOURCES: set[str] = {
     "momondo_meta",
     "kayak_meta",
     "cheapflights_meta",
+    "skyscanner_meta",
 }
 
 
@@ -400,7 +403,8 @@ _DIRECT_AIRLINE_connectorS: list[tuple[str, type, float]] = [
     ("skyairline_direct", SkyAirlineConnectorClient, 45.0),
     ("skyexpress_direct", SkyExpressConnectorClient, 20.0),
     ("tap_direct", TapConnectorClient, 45.0),
-    ("flyarystan_direct", FlyArystanConnectorClient, 45.0),
+    ("flyarystan_direct", FlyArystanConnectorClient, 15.0),
+    ("pia_direct", PiaConnectorClient, 25.0),
     ("aerolineas_direct", AerolineasConnectorClient, 45.0),
     ("chinaairlines_direct", ChinaAirlinesConnectorClient, 35.0),
     ("wingo_direct", WingoConnectorClient, 45.0),
@@ -474,6 +478,7 @@ _DIRECT_AIRLINE_connectorS: list[tuple[str, type, float]] = [
     ("momondo_meta", MomondoConnectorClient, 55.0),
     ("kayak_meta", KayakConnectorClient, 55.0),
     ("cheapflights_meta", CheapflightsConnectorClient, 55.0),
+    ("skyscanner_meta", SkyscannerConnectorClient, 55.0),
     ("serpapi_google", SerpApiGoogleConnectorClient, 30.0),
     ("avianca_direct", AviancaConnectorClient, 45.0),
     ("copa_direct", CopaConnectorClient, 45.0),

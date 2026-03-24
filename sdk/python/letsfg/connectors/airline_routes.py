@@ -385,6 +385,10 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
     },
     "flysafair": {"ZA"},
     "airpeace": {"NG", "GH", "ZA", "KE", "AE", "GB"},
+    "pia": {
+        "PK", "AE", "SA", "QA", "KW", "OM", "BH", "GB", "TR", "CN",
+        "MY", "BD", "CA", "JP", "TH",
+    },
     "biman": {
         "BD", "AE", "SA", "QA", "KW", "OM", "IN", "NP", "TH", "MY",
         "SG", "HK", "CN", "IT", "GB", "CA", "PK",
@@ -956,6 +960,13 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
         "IN", "JP", "KR", "CN", "HK", "TW", "SG", "TH", "MY", "PH", "ID",
         "AU", "NZ", "AE", "SA", "QA", "EG", "TR", "IL", "ZA", "KE",
     },
+    "skyscanner": {
+        "GB", "IE", "DE", "FR", "ES", "IT", "PT", "NL", "BE", "AT", "CH",
+        "SE", "NO", "DK", "FI", "PL", "CZ", "GR", "HU", "RO", "HR", "BG",
+        "US", "CA", "MX", "BR", "AR", "CL", "CO", "PE",
+        "IN", "JP", "KR", "CN", "HK", "TW", "SG", "TH", "MY", "PH", "ID",
+        "AU", "NZ", "AE", "SA", "QA", "EG", "TR", "IL", "ZA", "KE",
+    },
     "avianca": {
         "CO", "EC", "PE", "CL", "BR", "MX", "US", "CR", "GT", "SV", "HN",
         "PA", "NI", "CU", "DO", "JM", "TT", "CW", "AW", "ES",
@@ -1068,7 +1079,7 @@ def get_relevant_connectors(
     # Aggregators/OTAs search many airlines — use lenient OR filter
     _AGGREGATOR_KEYS = {
         "kiwi", "traveloka", "wego", "webjet", "tiket", "tripcom", "cleartrip", "edreams",
-        "opodo", "momondo", "kayak", "cheapflights",
+        "opodo", "momondo", "kayak", "cheapflights", "skyscanner",
     }
 
     relevant = []
