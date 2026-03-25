@@ -1,6 +1,6 @@
 # LetsFG Connector Worker — Cloud Run dependencies
 # The worker imports from the letsfg SDK (connectors, models, browser).
-# Pin to latest release — v1.3.1: wizzair KPSDK fix, turkish calendar, vueling route rejection
-letsfg==1.3.8
+# Pin to latest release — v1.3.9: proxy support + resource blocking for OTA connectors
+letsfg==1.3.9
 flask>=3.0
 gunicorn>=22.0
