@@ -95,14 +95,19 @@ class CheapflightsConnectorClient:
 
         pw = await async_playwright().start()
         try:
-            browser = await pw.chromium.launch(
-                headless=False,
-                args=[
+            from .browser import get_proxy
+            proxy = get_proxy("CHEAPFLIGHTS_PROXY") or get_proxy("KAYAK_PROXY")
+            launch_kw: dict = {
+                "headless": False,
+                "args": [
                     "--window-position=-2400,-2400",
                     "--window-size=1366,768",
                     "--disable-blink-features=AutomationControlled",
                 ],
-            )
+            }
+            if proxy:
+                launch_kw["proxy"] = proxy
+            browser = await pw.chromium.launch(**launch_kw)
             ctx = await browser.new_context(
                 viewport={"width": 1366, "height": 768},
                 user_agent=(
@@ -112,6 +117,9 @@ class CheapflightsConnectorClient:
                 ),
             )
             page = await ctx.new_page()
+            if proxy:
+                from .browser import block_heavy_resources
+                await block_heavy_resources(page)
             page.on("response", on_response)
 
             dep_date = req.date_from.isoformat()

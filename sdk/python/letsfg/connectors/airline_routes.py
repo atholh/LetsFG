@@ -1067,6 +1067,68 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
     "cyprusairways": {
         "CY", "GR", "AE", "IL", "LB", "FR", "IT", "ES",
     },
+    # ── New OTA/meta connectors (Instance B batch) ──
+    "skiplagged": {
+        "US", "CA", "MX", "GB", "DE", "FR", "ES", "IT", "NL", "IE",
+        "JP", "KR", "AU", "NZ", "TH", "IN", "CO", "BR", "CL", "PE",
+    },
+    # ── Instance A OTA/meta connectors ──
+    "etraveli": {
+        "SE", "NO", "DK", "FI", "GB", "IE", "DE", "FR", "ES", "IT", "PT",
+        "NL", "BE", "AT", "CH", "PL", "CZ", "GR", "HU", "RO", "HR", "BG",
+        "US", "CA", "AE", "TH", "IN", "AU", "NZ", "BR", "TR", "EG",
+    },
+    "travelgenio": {
+        "ES", "IT", "FR", "PT", "DE", "GB", "AR", "BR", "MX", "CO", "CL",
+        "PE", "US", "CA", "AE", "IN", "AU",
+    },
+    "ixigo": {
+        "IN", "LK", "NP", "BD", "PK", "MV", "BT",
+        "AE", "SA", "QA", "KW", "OM", "BH",
+        "TH", "SG", "MY", "ID", "VN",
+        "GB", "US", "CA", "AU", "DE", "FR",
+    },
+    "rehlat": {
+        "KW", "SA", "AE", "BH", "OM", "QA",
+        "EG", "JO", "LB", "IQ", "IR",
+        "IN", "PK", "BD", "LK",
+        "TH", "MY", "SG", "PH", "ID",
+        "GB", "DE", "FR", "TR",
+    },
+    "travelstart": {
+        "ZA", "NG", "KE", "EG", "GH", "TZ", "ET", "MA", "TN", "DZ",
+        "MU", "SN", "CI", "CM", "UG", "ZW", "MZ", "BW", "NA", "RW",
+        "AE", "SA", "QA", "TR", "IN", "GB", "FR", "DE",
+    },
+    # ── Rebuilt CDP Chrome connectors (Instance B batch) ──
+    "aviasales": {
+        "RU", "KZ", "UZ", "TJ", "KG", "BY", "UA", "GE", "AM", "AZ",
+        "TR", "TH", "AE", "IN", "EG", "DE", "IT", "ES", "FR", "GB",
+        "US", "CN", "JP", "KR", "VN", "ID", "MY", "LK", "MV",
+    },
+    "travix": {
+        "NL", "BE", "DE", "FR", "GB", "IE", "AT", "CH", "ES", "IT",
+        "PT", "SE", "NO", "DK", "FI", "PL", "CZ", "GR", "TR",
+        "US", "CA", "AU", "NZ", "TH", "JP", "SG", "IN", "AE", "ZA",
+    },
+    "travelup": {
+        "GB", "IE", "US", "CA", "AE", "IN", "PK", "BD", "LK",
+        "DE", "FR", "ES", "IT", "NL", "TH", "SG", "AU", "NZ",
+    },
+    "lastminute": {
+        "GB", "IE", "DE", "FR", "ES", "IT", "NL", "BE", "AT", "CH",
+        "PT", "SE", "NO", "DK", "FI", "PL", "CZ", "GR", "HU", "RO",
+        "US", "CA", "AU", "NZ", "AE", "TH", "IN", "JP", "BR", "TR",
+    },
+    "byojet": {
+        "AU", "NZ", "SG", "TH", "MY", "ID", "PH", "IN", "JP", "KR",
+        "US", "CA", "GB", "AE", "FJ", "HK", "VN", "CN",
+    },
+    "yatra": {
+        "IN", "AE", "SA", "QA", "OM", "KW", "BH",
+        "SG", "TH", "MY", "LK", "NP", "BD", "PK",
+        "US", "CA", "GB", "DE", "FR", "AU", "HK",
+    },
 }
 
 
@@ -1107,6 +1169,10 @@ def get_relevant_connectors(
     _AGGREGATOR_KEYS = {
         "kiwi", "traveloka", "wego", "webjet", "tiket", "tripcom", "cleartrip", "edreams",
         "opodo", "momondo", "kayak", "cheapflights", "skyscanner",
+        "skiplagged",
+        "etraveli", "travelgenio", "ixigo", "rehlat",
+        "travelstart",
+        "aviasales", "travix", "travelup", "lastminute", "byojet", "yatra",
     }
 
     relevant = []

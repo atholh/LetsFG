@@ -177,6 +177,50 @@ def find_chrome() -> str:
 
 # ── Stealth window args ────────────────────────────────────────────────────────
 
+def get_proxy(env_var: str) -> Optional[dict]:
+    """Read a Playwright proxy dict from an environment variable.
+
+    Set the env var to an HTTP proxy URL, e.g.
+        KAYAK_PROXY="http://user:pass@resi-proxy.example.com:10001"
+
+    Returns a dict suitable for ``pw.chromium.launch(proxy=...)``,
+    or *None* when the variable is unset/empty.
+    """
+    raw = os.environ.get(env_var, "").strip()
+    if not raw:
+        return None
+    from urllib.parse import urlparse
+
+    p = urlparse(raw)
+    result: dict[str, str] = {"server": f"{p.scheme}://{p.hostname}:{p.port}"}
+    if p.username:
+        result["username"] = p.username
+    if p.password:
+        result["password"] = p.password
+    return result
+
+
+# ── Resource blocking — saves bandwidth when routing through residential proxy ──
+
+_BLOCKED_RESOURCE_TYPES = frozenset({"image", "media", "font"})
+
+
+async def _block_handler(route):
+    if route.request.resource_type in _BLOCKED_RESOURCE_TYPES:
+        await route.abort()
+    else:
+        await route.continue_()
+
+
+async def block_heavy_resources(page) -> None:
+    """Block images, video, and fonts to save proxy bandwidth.
+
+    Call right after ``ctx.new_page()``, before navigation.
+    Keeps scripts & stylesheets intact (anti-bot systems may check them).
+    """
+    await page.route("**/*", _block_handler)
+
+
 def _is_visible() -> bool:
     """Check if browsers should be visible (for debugging)."""
     return os.environ.get("BOOSTED_BROWSER_VISIBLE", "").strip() in ("1", "true", "yes")

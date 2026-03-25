@@ -207,6 +207,17 @@ from .airgreenland import AirGreenlandConnectorClient
 from .starlux import StarluxConnectorClient
 from .azoresairlines import AzoresAirlinesConnectorClient
 from .cyprusairways import CyprusAirwaysConnectorClient
+from .skiplagged import SkiplaggedConnectorClient
+from .aviasales import AviasalesConnectorClient
+from .travix import TravixConnectorClient
+from .travelup import TravelupConnectorClient
+from .lastminute import LastminuteConnectorClient
+from .byojet import ByojetConnectorClient
+from .yatra import YatraConnectorClient
+from .etraveli import EtraveliConnectorClient, TravelgenioConnectorClient
+from .ixigo import IxigoConnectorClient
+from .rehlat import RehlatConnectorClient
+from .travelstart import TravelstartConnectorClient
 
 from ..models.flights import AirlineSummary, FlightOffer, FlightSearchRequest, FlightSearchResponse
 
@@ -268,6 +279,13 @@ _BROWSER_SOURCES: set[str] = {
     "kayak_meta",
     "cheapflights_meta",
     "skyscanner_meta",
+
+    "aviasales_meta",
+    "travix_ota",
+    "travelup_ota",
+    "lastminute_ota",
+    "byojet_ota",
+    "yatra_ota",
 }
 
 
@@ -506,6 +524,21 @@ _DIRECT_AIRLINE_connectorS: list[tuple[str, type, float]] = [
     ("azoresairlines_direct", AzoresAirlinesConnectorClient, 25.0),
     # ── Cyprus Airways (EveryMundo __NEXT_DATA__ via curl_cffi) ──
     ("cyprusairways_direct", CyprusAirwaysConnectorClient, 25.0),
+    # ── New OTA/meta connectors (Instance B batch) ──
+    ("skiplagged_meta", SkiplaggedConnectorClient, 25.0),
+    # ── New OTA/meta connectors (Instance A batch — Playwright + API interception) ──
+    ("etraveli_ota", EtraveliConnectorClient, 55.0),
+    ("travelgenio_ota", TravelgenioConnectorClient, 55.0),
+    ("ixigo_meta", IxigoConnectorClient, 55.0),
+    ("rehlat_ota", RehlatConnectorClient, 55.0),
+    ("travelstart_ota", TravelstartConnectorClient, 45.0),
+    # ── Rebuilt CDP Chrome connectors (Instance B batch) ──
+    ("aviasales_meta", AviasalesConnectorClient, 55.0),
+    ("travix_ota", TravixConnectorClient, 55.0),
+    ("travelup_ota", TravelupConnectorClient, 55.0),
+    ("lastminute_ota", LastminuteConnectorClient, 55.0),
+    ("byojet_ota", ByojetConnectorClient, 55.0),
+    ("yatra_ota", YatraConnectorClient, 55.0),
 ]
 
 
