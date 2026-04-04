@@ -782,29 +782,47 @@ async def _search_local(
 
 async def _call_connector(
     client: httpx.AsyncClient, headers: dict, task: dict,
+    max_retries: int = 2,
 ) -> dict:
-    """Make a single HTTP call to the connector-worker service."""
+    """Make a single HTTP call to the connector-worker service.
+
+    Retries on HTTP 500 (Cloud Run cold-start / no available instance)
+    with exponential backoff: 2s, 4s.  By the time the retry fires,
+    Cloud Run will have spun up more instances from the initial burst.
+    """
     connector_id = task["connector_id"]
-    try:
-        resp = await client.post(
-            f"{CONNECTOR_WORKER_URL}/run",
-            json=task,
-            headers=headers,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        n_offers = len(data.get("offers", []))
-        if n_offers:
-            logger.info("+ %s: %d offers in %.1fs",
-                        connector_id, n_offers,
-                        data.get("elapsed_seconds", 0))
-        return data
-    except httpx.HTTPStatusError as exc:
-        logger.warning("- %s: HTTP %s", connector_id, exc.response.status_code)
-        return {"offers": [], "total_results": 0}
-    except Exception as exc:
-        logger.warning("- %s: %s", connector_id, exc)
-        return {"offers": [], "total_results": 0}
+    for attempt in range(max_retries + 1):
+        try:
+            resp = await client.post(
+                f"{CONNECTOR_WORKER_URL}/run",
+                json=task,
+                headers=headers,
+            )
+            if resp.status_code == 500 and attempt < max_retries:
+                await asyncio.sleep(2 ** (attempt + 1))
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            n_offers = len(data.get("offers", []))
+            if n_offers:
+                logger.info("+ %s: %d offers in %.1fs%s",
+                            connector_id, n_offers,
+                            data.get("elapsed_seconds", 0),
+                            f" (retry {attempt})" if attempt else "")
+            return data
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 500 and attempt < max_retries:
+                await asyncio.sleep(2 ** (attempt + 1))
+                continue
+            logger.warning("- %s: HTTP %s", connector_id, exc.response.status_code)
+            return {"offers": [], "total_results": 0}
+        except Exception as exc:
+            if attempt < max_retries:
+                await asyncio.sleep(2 ** (attempt + 1))
+                continue
+            logger.warning("- %s: %s", connector_id, exc)
+            return {"offers": [], "total_results": 0}
+    return {"offers": [], "total_results": 0}
 
 
 # ── Callback ────────────────────────────────────────────────────────────────
