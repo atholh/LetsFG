@@ -136,36 +136,92 @@ async def _human_mouse_move(page, start_x: float, start_y: float, end_x: float, 
 
 
 async def _solve_cf_turnstile(page) -> bool:
-    """Handle Cloudflare Turnstile challenge if present."""
+    """Actively attempt to solve Cloudflare Turnstile challenge.
+
+    Tries multiple strategies:
+    1. Click the checkbox inside the CF iframe (standard Turnstile).
+    2. Click the Turnstile widget container (managed/invisible modes).
+    3. Click any visible verify/confirm button on the page.
+    """
+    solved = False
+
+    # Strategy 1: iframe checkbox
     try:
-        # Check for Turnstile iframe or checkbox
         cf_frame = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
         checkbox = cf_frame.locator('input[type="checkbox"]')
-        
         if await checkbox.count() > 0:
-            logger.info("WEGO: clicking Turnstile checkbox")
+            logger.info("WEGO: clicking Turnstile checkbox in iframe")
             box = await checkbox.bounding_box()
             if box:
-                cx = box['x'] + box['width'] / 2
-                cy = box['y'] + box['height'] / 2
-                await _human_mouse_move(page, 100, 100, cx, cy)
-                await asyncio.sleep(random.uniform(0.2, 0.4))
+                cx = box["x"] + box["width"] / 2
+                cy = box["y"] + box["height"] / 2
+                await _human_mouse_move(page, random.randint(50, 200), random.randint(50, 200), cx, cy)
+                await asyncio.sleep(random.uniform(0.15, 0.35))
                 await page.mouse.click(cx, cy)
-                await asyncio.sleep(3)
-            return True
-    except Exception:
-        pass
-    
-    # Check for turnstile div (patchright usually auto-handles this)
-    try:
-        turnstile = page.locator('[class*="turnstile"], [id*="turnstile"]')
-        if await turnstile.count() > 0:
-            await asyncio.sleep(2)  # patchright auto-solves
-            return True
-    except Exception:
-        pass
-    
-    return False
+                await asyncio.sleep(2)
+                solved = True
+    except Exception as e:
+        logger.debug("WEGO: Turnstile iframe checkbox attempt: %s", e)
+
+    # Strategy 2: click the iframe element itself (triggers Turnstile
+    # in managed/invisible mode where there's no visible checkbox)
+    if not solved:
+        try:
+            iframe_el = page.locator('iframe[src*="challenges.cloudflare.com"]')
+            if await iframe_el.count() > 0:
+                logger.info("WEGO: clicking Turnstile iframe element")
+                box = await iframe_el.bounding_box()
+                if box and box["width"] > 0 and box["height"] > 0:
+                    cx = box["x"] + box["width"] / 2
+                    cy = box["y"] + box["height"] / 2
+                    await _human_mouse_move(page, random.randint(50, 200), random.randint(50, 200), cx, cy)
+                    await asyncio.sleep(random.uniform(0.1, 0.3))
+                    await page.mouse.click(cx, cy)
+                    await asyncio.sleep(2)
+                    solved = True
+        except Exception as e:
+            logger.debug("WEGO: Turnstile iframe click attempt: %s", e)
+
+    # Strategy 3: click turnstile widget container
+    if not solved:
+        try:
+            for selector in [
+                '[class*="turnstile"]',
+                '[id*="turnstile"]',
+                '[class*="cf-turnstile"]',
+                'div.cf-turnstile',
+            ]:
+                widget = page.locator(selector)
+                if await widget.count() > 0:
+                    logger.info("WEGO: clicking Turnstile widget (%s)", selector)
+                    box = await widget.first.bounding_box()
+                    if box and box["width"] > 0:
+                        cx = box["x"] + box["width"] / 2
+                        cy = box["y"] + box["height"] / 2
+                        await _human_mouse_move(page, random.randint(50, 200), random.randint(50, 200), cx, cy)
+                        await asyncio.sleep(random.uniform(0.1, 0.3))
+                        await page.mouse.click(cx, cy)
+                        await asyncio.sleep(2)
+                        solved = True
+                        break
+        except Exception as e:
+            logger.debug("WEGO: Turnstile widget click attempt: %s", e)
+
+    # Strategy 4: click any verify/confirm button
+    if not solved:
+        try:
+            for btn_text in ["Verify", "verify", "Confirm", "I am human"]:
+                btn = page.locator(f'button:has-text("{btn_text}"), a:has-text("{btn_text}")')
+                if await btn.count() > 0:
+                    logger.info("WEGO: clicking '%s' button", btn_text)
+                    await btn.first.click()
+                    await asyncio.sleep(2)
+                    solved = True
+                    break
+        except Exception as e:
+            logger.debug("WEGO: verify button click attempt: %s", e)
+
+    return solved
 
 
 def _wego_slug(iata: str) -> str:
@@ -309,19 +365,60 @@ class WegoConnectorClient:
                     raise  # Will trigger retry with different proxy session
                 raise
 
-            # Handle Cloudflare challenge - patchright usually auto-solves
-            # but sometimes needs to wait for completion
-            for attempt in range(15):
-                title = await page.title()
-                if "Just a moment" in title or "Checking" in title.lower() or "challenge" in title.lower():
-                    if attempt == 0:
-                        logger.info("WEGO: Cloudflare challenge detected, waiting...")
-                    await asyncio.sleep(2)
-                else:
-                    if attempt > 0:
-                        logger.info("WEGO: Cloudflare passed after %d attempts", attempt)
+            # Handle Cloudflare challenge — patchright auto-solves most
+            # Turnstile variants, but we need to wait for completion and
+            # actively solve the checkbox variant if it appears.
+            cf_passed = False
+            for cf_wait in range(40):
+                try:
+                    title = await page.title()
+                except Exception:
+                    await asyncio.sleep(1)
+                    continue
+                title_lower = title.lower()
+                is_cf = (
+                    "just a moment" in title_lower
+                    or "checking" in title_lower
+                    or "challenge" in title_lower
+                    or "attention required" in title_lower
+                )
+                if not is_cf:
+                    if cf_wait > 0:
+                        logger.info("WEGO: Cloudflare passed after ~%ds", cf_wait)
+                    cf_passed = True
                     break
-            
+                if cf_wait == 0:
+                    logger.info("WEGO: Cloudflare challenge detected, waiting...")
+                # Every 5s try to actively solve Turnstile checkbox
+                if cf_wait > 0 and cf_wait % 5 == 0:
+                    await _solve_cf_turnstile(page)
+                await asyncio.sleep(1)
+
+            if not cf_passed:
+                # Last resort: reload and wait again (sometimes clears stuck CF)
+                logger.warning("WEGO: Cloudflare still blocking after 40s, reloading...")
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+                for cf_retry in range(20):
+                    try:
+                        title = await page.title()
+                    except Exception:
+                        await asyncio.sleep(1)
+                        continue
+                    title_lower = title.lower()
+                    if "just a moment" not in title_lower and "challenge" not in title_lower:
+                        logger.info("WEGO: Cloudflare passed after reload + %ds", cf_retry)
+                        cf_passed = True
+                        break
+                    if cf_retry % 5 == 0:
+                        await _solve_cf_turnstile(page)
+                    await asyncio.sleep(1)
+
+            if not cf_passed:
+                logger.warning("WEGO: Cloudflare challenge NOT resolved — results may be empty")
+
             # Wait for page to fully render and results to load
             logger.info("WEGO: waiting for flight results")
             await asyncio.sleep(5)
