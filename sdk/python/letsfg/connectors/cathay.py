@@ -4,7 +4,7 @@ Cathay Pacific open-search API scraper — direct curl_cffi, no auth needed.
 Cathay Pacific (IATA: CX) is a Hong Kong-based full-service airline.
 open-search API: book.cathaypacific.com — calendar pricing, no cookies/tokens.
 
-Strategy (Mar 2026):
+Strategy (Apr 2026):
 1. GET open-search endpoint with curl_cffi (impersonate Chrome)
 2. Returns cheapest one-way fares per destination from a given origin
 3. Filter for requested destination/date
@@ -17,8 +17,9 @@ API details:
 - Response: array of {date_departure, base_fare, total_fare, currency, tax,
     outbound_cabin, origin, destination, tax_inclusive}
 - Currency varies by origin: HKG→HKD, SIN→SGD, SYD→AUD, TPE→TWD, BKK→THB
-- Supported origins (CBEUCBEU site): HKG, SIN, SYD, TPE, BKK, and many Asia-Pacific
-- NRT, LHR unsupported with this SITE code (400 Bad Request)
+- 28 supported origins with CBEUCBEU site (mostly Asia-Pacific)
+- European/American origins (LHR, JFK, NRT, PVG) return 400
+- Unsupported origins are skipped early to avoid error logging
 """
 
 from __future__ import annotations
@@ -43,6 +44,15 @@ from ..models.flights import (
 logger = logging.getLogger(__name__)
 
 _API_URL = "https://book.cathaypacific.com/CathayPacificV3/dyn/air/api/instant/open-search"
+
+# Origins confirmed working with CBEUCBEU site code (Apr 2026).
+# European/American origins (LHR, JFK, NRT, PVG, etc.) return 400.
+_SUPPORTED_ORIGINS: set[str] = {
+    "HKG", "SIN", "SYD", "TPE", "BKK", "ICN", "MNL", "KUL",
+    "DEL", "BOM", "MEL", "PER", "BNE", "CAN", "PEK", "CGK",
+    "SGN", "HAN", "DPS", "FUK", "KIX", "NGO", "CEB", "CMB",
+    "DAC", "KTM", "HYD", "MAA",
+}
 
 # Airports that should be treated as equivalent for multi-airport cities
 _CITY_AIRPORTS: dict[str, set[str]] = {
@@ -91,6 +101,11 @@ class CathayConnectorClient:
         return self._empty(req)
 
     def _api_search_sync(self, req: FlightSearchRequest) -> list[FlightOffer] | None:
+        # Skip unsupported origins early — they always return 400
+        if req.origin not in _SUPPORTED_ORIGINS:
+            logger.info("Cathay: origin %s not in supported set, skipping", req.origin)
+            return []
+
         params = {
             "ORIGIN": req.origin,
             "LANGUAGE": "GB",
