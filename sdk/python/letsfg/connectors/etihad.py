@@ -49,6 +49,61 @@ from ..models.flights import (
 )
 from .browser import find_chrome, stealth_popen_kwargs, _launched_procs, proxy_chrome_args, auto_block_if_proxied, inject_stealth_js
 
+# Map IATA airport/city codes to Etihad locale codes.
+# The calendar pricing API validates origin country against the site locale.
+_ORIGIN_TO_LOCALE: dict[str, str] = {
+    # UAE
+    "AUH": "en-ae", "DXB": "en-ae", "SHJ": "en-ae",
+    # Saudi Arabia
+    "RUH": "en-sa", "JED": "en-sa", "DMM": "en-sa",
+    # India
+    "DEL": "en-in", "BOM": "en-in", "BLR": "en-in", "HYD": "en-in",
+    "MAA": "en-in", "CCU": "en-in", "AMD": "en-in", "COK": "en-in",
+    # UK
+    "LHR": "en-gb", "LGW": "en-gb", "MAN": "en-gb", "EDI": "en-gb", "LON": "en-gb",
+    # US
+    "JFK": "en-us", "IAD": "en-us", "ORD": "en-us", "LAX": "en-us", "SFO": "en-us",
+    "EWR": "en-us", "DFW": "en-us", "NYC": "en-us",
+    # Australia
+    "SYD": "en-au", "MEL": "en-au", "BNE": "en-au", "PER": "en-au",
+    # France
+    "CDG": "en-fr", "ORY": "en-fr", "PAR": "en-fr",
+    # Germany
+    "FRA": "en-de", "MUC": "en-de", "BER": "en-de", "DUS": "en-de",
+    # Egypt
+    "CAI": "en-eg",
+    # Pakistan
+    "ISB": "en-pk", "KHI": "en-pk", "LHE": "en-pk",
+    # Japan
+    "NRT": "en-jp", "HND": "en-jp", "TYO": "en-jp",
+    # South Korea
+    "ICN": "en-kr", "SEL": "en-kr",
+    # Thailand
+    "BKK": "en-th",
+    # Singapore
+    "SIN": "en-sg",
+    # Malaysia
+    "KUL": "en-my",
+    # Indonesia
+    "CGK": "en-id",
+    # Philippines
+    "MNL": "en-ph",
+    # Qatar
+    "DOH": "en-qa",
+    # Kuwait
+    "KWI": "en-kw",
+    # Bahrain
+    "BAH": "en-bh",
+    # Oman
+    "MCT": "en-om",
+    # Jordan
+    "AMM": "en-jo",
+    # Kenya
+    "NBO": "en-ke",
+    # South Africa
+    "JNB": "en-za", "CPT": "en-za",
+}
+
 logger = logging.getLogger(__name__)
 
 _DEBUG_PORT = 9451
@@ -198,20 +253,33 @@ async def _reset_profile():
     except Exception:
         pass
     if _chrome_proc:
+        pid = _chrome_proc.pid
         try:
-            _chrome_proc.terminate()
+            _chrome_proc.kill()
         except Exception:
             pass
+        try:
+            _chrome_proc.wait(timeout=5)
+        except Exception:
+            try:
+                import signal
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
     _browser = None
     _context = None
     _pw_instance = None
     _chrome_proc = None
+    await asyncio.sleep(0.5)
     if os.path.isdir(_USER_DATA_DIR):
-        try:
-            shutil.rmtree(_USER_DATA_DIR)
-            logger.info("Etihad: deleted stale Chrome profile")
-        except Exception:
-            pass
+        for retry in range(3):
+            try:
+                shutil.rmtree(_USER_DATA_DIR)
+                logger.info("Etihad: deleted stale Chrome profile")
+                break
+            except Exception:
+                if retry < 2:
+                    await asyncio.sleep(1.0)
 
 
 class EtihadConnectorClient:
@@ -232,9 +300,11 @@ class EtihadConnectorClient:
         await auto_block_if_proxied(page)
 
         try:
-            logger.info("Etihad: loading homepage for %s→%s", req.origin, req.destination)
+            # Determine locale from origin for correct market context
+            locale = _ORIGIN_TO_LOCALE.get(req.origin, "en-ae")
+            logger.info("Etihad: loading homepage for %s→%s (locale=%s)", req.origin, req.destination, locale)
             await page.goto(
-                "https://www.etihad.com/en/",
+                f"https://www.etihad.com/{locale}/",
                 wait_until="domcontentloaded",
                 timeout=int(self.timeout * 1000),
             )
@@ -254,15 +324,8 @@ class EtihadConnectorClient:
 
             # Direct API call from browser JS context (bypasses Akamai — same origin, valid session)
             dep = req.date_from.strftime("%Y-%m-%d") if hasattr(req.date_from, 'strftime') else str(req.date_from)
-
-            # The 1A Calendar Pricing Service requires originAirportCityCode
-            # and originAirportCountryCode — without these it returns 400
-            # "Invalid Origin Airport Country".
-            from .airline_routes import get_country
-            origin_country = get_country(api_origin) or "AE"
-
             result = await page.evaluate("""async (params) => {
-                const [origin, dest, depDate, originCountry] = params;
+                const [origin, dest, depDate] = params;
                 try {
                     const resp = await fetch('/ada-services/bff-calendar-pricing/service/instant-search/v2/fetch-prices', {
                         method: 'POST',
@@ -272,11 +335,9 @@ class EtihadConnectorClient:
                         },
                         body: JSON.stringify({
                             originAirportCode: origin,
-                            originAirportCityCode: origin,
-                            originAirportCountryCode: originCountry,
                             destinationAirportCode: dest,
                             cabinClass: 'ECONOMY',
-                            tripType: 'RT',
+                            tripType: 'return',
                             passengerTypeCode: 'ADT',
                             departureDate: depDate,
                             tripDuration: '7',
@@ -288,7 +349,7 @@ class EtihadConnectorClient:
                 } catch (e) {
                     return {_error: -1, _msg: e.message};
                 }
-            }""" , [api_origin, api_dest, dep, origin_country])
+            }""" , [api_origin, api_dest, dep])
 
             if not result or result.get("_error"):
                 err = result.get("_error", "?") if result else "null"
