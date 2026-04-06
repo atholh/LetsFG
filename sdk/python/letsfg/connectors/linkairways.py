@@ -100,6 +100,32 @@ class LinkAirwaysConnectorClient:
         finally:
             release_browser_slot()
 
+        # --- RT: second OW search for inbound ---
+        if req.return_from and offers:
+            ib_dt = (
+                datetime.combine(req.return_from, datetime.min.time())
+                if not isinstance(req.return_from, str)
+                else datetime.strptime(req.return_from, "%Y-%m-%d")
+            )
+            ib_date_str = ib_dt.strftime("%d/%m/%Y")
+            ib_date_iso = ib_dt.strftime("%Y-%m-%d")
+            ib_req = req.model_copy(update={
+                "origin": req.destination,
+                "destination": req.origin,
+                "date_from": req.return_from,
+                "return_from": None,
+            })
+            await acquire_browser_slot()
+            try:
+                ib_offers = await self._search_with_browser(
+                    req.destination, req.origin, ib_date_str, ib_date_iso,
+                    adults, children, infants, ib_req,
+                )
+            finally:
+                release_browser_slot()
+            if ib_offers:
+                offers = self._combine_rt(offers, ib_offers, req)
+
         offers.sort(key=lambda o: o.price if o.price > 0 else float("inf"))
         elapsed = time.monotonic() - t0
         logger.info(
@@ -409,6 +435,42 @@ class LinkAirwaysConnectorClient:
                 ))
 
         return offers
+
+    def _combine_rt(
+        self,
+        ob_offers: list[FlightOffer],
+        ib_offers: list[FlightOffer],
+        req: FlightSearchRequest,
+    ) -> list[FlightOffer]:
+        """Cross-multiply OB x IB one-way offers into RT combos."""
+        ob_sorted = sorted(ob_offers, key=lambda o: o.price)[:15]
+        ib_sorted = sorted(ib_offers, key=lambda o: o.price)[:10]
+        date_iso = req.date_from.strftime("%Y-%m-%d") if hasattr(req.date_from, "strftime") else str(req.date_from)
+        ret_iso = req.return_from.strftime("%Y-%m-%d") if hasattr(req.return_from, "strftime") else str(req.return_from)
+        bk_url = (
+            f"https://search.linkairways.com/FC/Flight.aspx"
+            f"?depCity={req.origin}&arrCity={req.destination}"
+            f"&depDate={date_iso}&retDate={ret_iso}"
+        )
+        combined: list[FlightOffer] = []
+        for ob in ob_sorted:
+            for ib in ib_sorted:
+                total = round(ob.price + ib.price, 2)
+                key = f"{ob.id}_{ib.id}"
+                cid = f"fc_rt_{hashlib.md5(key.encode()).hexdigest()[:12]}"
+                combined.append(FlightOffer(
+                    id=cid,
+                    price=total,
+                    currency=_CURRENCY,
+                    airlines=[_AIRLINE_NAME],
+                    owner_airline=_AIRLINE_NAME,
+                    outbound=ob.outbound,
+                    inbound=ib.outbound,
+                    booking_url=bk_url,
+                    source="linkairways_direct",
+                ))
+        combined.sort(key=lambda o: o.price)
+        return combined
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         h = hashlib.md5(

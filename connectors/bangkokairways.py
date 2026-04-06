@@ -42,18 +42,14 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from connectors.browser import (
-    _launched_pw_instances,
-    acquire_browser_slot,
-    release_browser_slot,
-)
+from .browser import _launched_pw_instances, acquire_browser_slot, auto_block_if_proxied, release_browser_slot
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +155,7 @@ async def _refresh_session():
 
     # Visit booking page to pass Incapsula challenge
     page = await ctx.new_page()
+    await auto_block_if_proxied(page)
     await page.add_init_script(
         "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
     )
@@ -183,6 +180,7 @@ async def _refresh_session():
 
         # Open a clean page on the API domain (shares cookies)
         _api_page = await ctx.new_page()
+        await auto_block_if_proxied(_api_page)
         await _api_page.goto(
             f"{_API_BASE}/", wait_until="commit", timeout=15000
         )
@@ -382,6 +380,47 @@ def _parse(data: dict, req: FlightSearchRequest) -> list[FlightOffer]:
     return offers
 
 
+def _combine_rt(
+    ob_offers: list[FlightOffer],
+    ib_offers: list[FlightOffer],
+    req: FlightSearchRequest,
+) -> list[FlightOffer]:
+    """Cross-multiply OB x IB into RT combo offers."""
+    ob_sorted = sorted(ob_offers, key=lambda o: o.price)[:15]
+    ib_sorted = sorted(ib_offers, key=lambda o: o.price)[:10]
+    date_str = req.date_from.strftime("%Y-%m-%d")
+    ret_str = req.return_from.strftime("%Y-%m-%d")
+    bk_url = (
+        f"https://www.bangkokair.com/flight/booking"
+        f"?origin={req.origin}&destination={req.destination}"
+        f"&departDate={date_str}&returnDate={ret_str}&tripType=R"
+    )
+    combined: list[FlightOffer] = []
+    for ob in ob_sorted:
+        for ib in ib_sorted:
+            total = round(ob.price + ib.price, 2)
+            cur = ob.currency or ib.currency or "THB"
+            key = f"{ob.id}_{ib.id}"
+            cid = f"pg_rt_{hashlib.md5(key.encode()).hexdigest()[:12]}"
+            combined.append(FlightOffer(
+                id=cid,
+                price=total,
+                currency=cur,
+                price_formatted=f"{total:.0f} {cur}",
+                outbound=ob.outbound,
+                inbound=ib.outbound,
+                airlines=list(set(ob.airlines + ib.airlines)),
+                owner_airline="PG",
+                conditions=ob.conditions,
+                booking_url=bk_url,
+                is_locked=False,
+                source="bangkokairways_direct",
+                source_tier="free",
+            ))
+    combined.sort(key=lambda o: o.price)
+    return combined
+
+
 class BangkokAirwaysConnectorClient:
     """Bangkok Airways — Playwright session + Amadeus DES API."""
 
@@ -422,6 +461,18 @@ class BangkokAirwaysConnectorClient:
                 return self._empty(req)
 
             offers = _parse(data, req)
+
+            # --- RT: second API call for inbound ---
+            if req.return_from and offers:
+                ret_date = req.return_from.isoformat()
+                ib_data = await _api_search(
+                    api_page, token, req.destination, req.origin, ret_date,
+                )
+                if ib_data:
+                    ib_offers = _parse(ib_data, req)
+                    if ib_offers:
+                        offers = _combine_rt(offers, ib_offers, req)
+
             offers.sort(key=lambda o: o.price)
 
             elapsed = time.monotonic() - t0
@@ -449,7 +500,7 @@ class BangkokAirwaysConnectorClient:
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         sh = hashlib.md5(
-            f"pg{req.origin}{req.destination}{req.date_from}".encode()
+            f"pg{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{sh}",

@@ -27,13 +27,14 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import auto_block_if_proxied, get_default_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ async def _get_browser():
         launch_kw: dict = {
             "headless": False,
             "channel": "chrome",
+            "proxy": get_default_proxy(),
             "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--window-position=-2400,-2400",
@@ -121,7 +123,7 @@ class UnitedConnectorClient:
                 currency="USD",
                 offers=offers,
                 total_results=len(offers),
-                search_id=f"united_{req.origin}_{req.destination}_{req.date_from}",
+                search_id=f"united_{req.origin}_{req.destination}_{req.date_from}_{req.return_from or ''}",
             )
         except Exception as e:
             logger.error("United search error: %s", e)
@@ -139,6 +141,7 @@ class UnitedConnectorClient:
         )
         try:
             page = await context.new_page()
+            await auto_block_if_proxied(page)
             try:
                 from playwright_stealth import stealth_async
                 await stealth_async(page)
@@ -222,20 +225,74 @@ class UnitedConnectorClient:
                 logger.error("United: failed to get SSE body: %s", e)
                 return []
 
-            return self._parse_sse(body, req)
+            ob_offers = self._parse_sse(body, req)
+
+            # --- RT: search inbound leg in same session ---
+            if not req.return_from or not ob_offers:
+                return ob_offers
+
+            sse_request_id = None
+            sse_done.clear()
+            sse_data_received = False
+
+            ret_str = req.return_from.strftime("%Y-%m-%d")
+            ib_fsr = (
+                f"https://www.united.com/en/us/fsr/choose-flights"
+                f"?f={req.destination}&t={req.origin}&d={ret_str}"
+                f"&tt=1&sc=7&px={req.adults}&taxng=1&newHP=True"
+                f"&clm=7&st=bestmatches&tqp=R"
+            )
+            logger.info("United RT: navigating to IB FSR: %s", ib_fsr)
+            await page.goto(
+                ib_fsr,
+                wait_until="domcontentloaded",
+                timeout=int(self.timeout * 1000),
+            )
+
+            try:
+                await asyncio.wait_for(sse_done.wait(), timeout=self.timeout)
+            except asyncio.TimeoutError:
+                if not sse_data_received:
+                    logger.warning("United RT: IB SSE timed out — returning OW")
+                    return ob_offers
+
+            if not sse_request_id:
+                return ob_offers
+
+            try:
+                ib_resp = await cdp.send(
+                    "Network.getResponseBody",
+                    {"requestId": sse_request_id},
+                )
+                ib_body = ib_resp.get("body", "")
+            except Exception:
+                return ob_offers
+
+            ib_offers = self._parse_sse(
+                ib_body, req,
+                origin=req.destination, destination=req.origin, date=req.return_from,
+            )
+            if not ib_offers:
+                return ob_offers
+
+            return self._combine_rt(ob_offers, ib_offers, req)
         finally:
             await context.close()
 
     def _parse_sse(
         self, body: str, req: FlightSearchRequest,
+        *, origin: str = "", destination: str = "", date=None,
     ) -> list[FlightOffer]:
         """Parse SSE event stream into FlightOffers."""
+        o = origin or req.origin
+        d = destination or req.destination
+        dt = date or req.date_from
         events = body.split("\n\n")
         max_stops = req.max_stopovers
-        date_str = req.date_from.strftime("%Y-%m-%d")
+        date_str = dt.strftime("%Y-%m-%d")
         booking_url = (
             f"https://www.united.com/en/us/fsr/choose-flights"
-            f"?f={req.origin}&t={req.destination}&d={date_str}"
+            f"?f={o}&t={d}&d={date_str}"
             f"&tt=1&sc=7&px={req.adults}"
         )
         offers: list[FlightOffer] = []
@@ -357,6 +414,46 @@ class UnitedConnectorClient:
             source_tier="free",
         )
 
+    def _combine_rt(
+        self,
+        ob_offers: list[FlightOffer],
+        ib_offers: list[FlightOffer],
+        req: FlightSearchRequest,
+    ) -> list[FlightOffer]:
+        """Cross-multiply OB x IB one-way offers into RT combos."""
+        ob_sorted = sorted(ob_offers, key=lambda o: o.price)[:15]
+        ib_sorted = sorted(ib_offers, key=lambda o: o.price)[:10]
+        date_str = req.date_from.strftime("%Y-%m-%d")
+        ret_str = req.return_from.strftime("%Y-%m-%d")
+        bk_url = (
+            f"https://www.united.com/en/us/fsr/choose-flights"
+            f"?f={req.origin}&t={req.destination}&d={date_str}"
+            f"&tt=2&sc=7&px={req.adults}&rd={ret_str}"
+            f"&taxng=1&newHP=True&clm=7&st=bestmatches&tqp=R"
+        )
+        combined: list[FlightOffer] = []
+        for ob in ob_sorted:
+            for ib in ib_sorted:
+                total = round(ob.price + ib.price, 2)
+                key = f"{ob.id}_{ib.id}"
+                cid = f"ua_rt_{hashlib.md5(key.encode()).hexdigest()[:12]}"
+                combined.append(FlightOffer(
+                    id=cid,
+                    price=total,
+                    currency="USD",
+                    price_formatted=f"${total:.2f}",
+                    outbound=ob.outbound,
+                    inbound=ib.outbound,
+                    airlines=list(set(ob.airlines + ib.airlines)),
+                    owner_airline="UA",
+                    booking_url=bk_url,
+                    is_locked=False,
+                    source="united_direct",
+                    source_tier="free",
+                ))
+        combined.sort(key=lambda o: o.price)
+        return combined
+
     @staticmethod
     def _extract_fare_price(product: dict) -> Optional[float]:
         """Get fare total from a product's prices array."""
@@ -411,5 +508,5 @@ class UnitedConnectorClient:
             currency="USD",
             offers=[],
             total_results=0,
-            search_id=f"united_{req.origin}_{req.destination}_{req.date_from}",
+            search_id=f"united_{req.origin}_{req.destination}_{req.date_from}_{req.return_from or ''}",
         )

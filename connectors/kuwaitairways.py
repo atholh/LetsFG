@@ -7,7 +7,7 @@ headed CDP Chrome with form fill + API interception is required.
 
 Strategy (CDP Chrome + API interception):
 1. Launch headed Chrome via CDP (off-screen, stealth).
-2. Navigate to airchina.com → SPA loads with search widget.
+2. Navigate to kuwaitairways.com → SPA loads with search widget.
 3. Accept cookies → set one-way → fill origin/dest → select date → search.
 4. Intercept the search API response (flight availability JSON).
 5. If API not captured, fall back to DOM scraping on results page.
@@ -27,14 +27,14 @@ import time
 from datetime import datetime, date, timedelta
 from typing import Optional
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from connectors.browser import find_chrome, stealth_popen_kwargs, _launched_procs
+from .browser import find_chrome, stealth_popen_kwargs, _launched_procs, proxy_chrome_args, auto_block_if_proxied
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,7 @@ async def _get_context():
                 f"--remote-debugging-port={_DEBUG_PORT}",
                 f"--user-data-dir={_USER_DATA_DIR}",
                 "--no-first-run",
+                *proxy_chrome_args(),
                 "--no-default-browser-check",
                 "--disable-blink-features=AutomationControlled",
                 "--window-position=-2400,-2400",
@@ -180,9 +181,20 @@ class KuwaitAirwaysConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         context = await _get_context()
         page = await context.new_page()
+        await auto_block_if_proxied(page)
 
         search_data: dict = {}
         api_event = asyncio.Event()
@@ -221,19 +233,17 @@ class KuwaitAirwaysConnectorClient:
             await asyncio.sleep(5.0)
             await _dismiss_overlays(page)
 
-            # One-way toggle
+            # One-way toggle — Kuwait Airways uses radio input#tid2 value="O"
             await page.evaluate("""() => {
-                const cssEls = document.querySelectorAll(
-                    '[class*="one-way"], [class*="oneway"], input[value="OW"], ' +
-                    'div[class*="trip-type"] label:nth-child(2), [data-value="OW"]'
-                );
-                for (const el of cssEls) {
-                    if (el.offsetHeight > 0) { el.click(); return; }
-                }
-                const textEls = document.querySelectorAll('label, li, a, button, span, div[class*="trip"], mat-radio-button');
+                const ow = document.querySelector('input#tid2[value="O"]') ||
+                            document.querySelector('input[name="tid"][value="O"]');
+                if (ow) { ow.click(); return; }
+                const li = document.querySelector('li.second-li');
+                if (li) { li.click(); return; }
+                const textEls = document.querySelectorAll('label, li, a, button, span');
                 for (const el of textEls) {
                     const t = (el.textContent || '').trim().toLowerCase();
-                    if ((t === 'one way' || t === 'one-way' || t === 'one way trip' || t.includes('one way')) && el.offsetHeight > 0) {
+                    if ((t === 'one way' || t === 'one-way') && el.offsetHeight > 0) {
                         el.click(); return;
                     }
                 }
@@ -254,12 +264,14 @@ class KuwaitAirwaysConnectorClient:
             if not ok:
                 return self._empty(req)
 
-            # Click search
+            # Click search — Kuwait Airways uses div#btnFindFlight
             await page.evaluate("""() => {
-                const btns = document.querySelectorAll('button, input[type="submit"], a');
+                const btn = document.querySelector('#btnFindFlight');
+                if (btn) { btn.click(); return; }
+                const btns = document.querySelectorAll('button, input[type="submit"], a, div');
                 for (const b of btns) {
                     const t = (b.textContent || b.value || '').trim().toLowerCase();
-                    if ((t.includes('search') || t.includes('find') || t.includes('查询') || t.includes('搜索'))
+                    if ((t.includes('search') || t.includes('find flight'))
                         && b.offsetHeight > 0) {
                         b.click(); return;
                     }
@@ -273,8 +285,8 @@ class KuwaitAirwaysConnectorClient:
                 if api_event.is_set():
                     break
                 url = page.url
-                if any(k in url.lower() for k in ["result", "search", "flight", "availability"]):
-                    await asyncio.sleep(4.0)
+                if any(k in url.lower() for k in ["result", "search", "flight", "availability", "digital."]):
+                    await asyncio.sleep(8.0)  # Amadeus NDB Angular app needs time to render
                     break
                 await asyncio.sleep(1.0)
 
@@ -295,7 +307,7 @@ class KuwaitAirwaysConnectorClient:
             logger.info("KuwaitAirways %s→%s: %d offers in %.1fs", req.origin, req.destination, len(offers), elapsed)
 
             search_hash = hashlib.md5(
-                f"kuwaitairways{req.origin}{req.destination}{req.date_from}".encode()
+                f"kuwaitairways{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
             ).hexdigest()[:12]
             currency = offers[0].currency if offers else self.DEFAULT_CURRENCY
             return FlightSearchResponse(
@@ -303,7 +315,7 @@ class KuwaitAirwaysConnectorClient:
                 currency=currency, offers=offers, total_results=len(offers),
             )
         except Exception as e:
-            logger.error("AirChina error: %s", e)
+            logger.error("KuwaitAirways error: %s", e)
             return self._empty(req)
         finally:
             try:
@@ -317,54 +329,21 @@ class KuwaitAirwaysConnectorClient:
 
     async def _fill_airport(self, page, direction: str, iata: str) -> bool:
         try:
-            sel = await page.evaluate("""(args) => {
-                const [dir, iata] = args;
-                const selectors = dir === 'origin'
-                    ? ['#fromCity', '#departCity', '#origin', 'input[name*="from"]',
-                       'input[name*="origin"]', 'input[name*="depart"]',
-                       'input[placeholder*="From"]', 'input[placeholder*="Depart"]',
-                       'input[placeholder*="出发"]']
-                    : ['#toCity', '#arriveCity', '#destination', 'input[name*="to"]',
-                       'input[name*="dest"]', 'input[name*="arriv"]',
-                       'input[placeholder*="To"]', 'input[placeholder*="Arriv"]',
-                       'input[placeholder*="到达"]'];
-                for (const s of selectors) {
-                    const el = document.querySelector(s);
-                    if (el && el.offsetHeight > 0) return s;
-                }
-                return null;
-            }""", [direction, iata])
-            if not sel:
-                return False
-
-            field = page.locator(sel).first
-            await field.click(timeout=5000)
-            await asyncio.sleep(0.5)
-            await page.keyboard.press("Control+a")
-            await page.keyboard.press("Backspace")
-            await field.type(iata, delay=120)
-            await asyncio.sleep(2.0)
-
-            selected = await page.evaluate("""(iata) => {
-                const opts = document.querySelectorAll(
-                    '[role="option"], [class*="suggest"] li, [class*="dropdown"] li, ' +
-                    '[class*="autocomplete"] li, .search-result-item, [class*="city-item"]'
-                );
-                for (const o of opts) {
-                    if (o.textContent.includes(iata) && o.offsetHeight > 0) {
-                        o.click(); return true;
-                    }
+            # Kuwait Airways uses Selectize.js — set value via JS API directly
+            sel_id = "seldcity1" if direction == "origin" else "selacity1"
+            ok = await page.evaluate("""([selId, iata]) => {
+                const el = document.querySelector('#' + selId);
+                if (el && el.selectize) {
+                    el.selectize.setValue(iata);
+                    return el.selectize.getValue() === iata;
                 }
                 return false;
-            }""", iata)
-            if not selected:
-                await page.keyboard.press("ArrowDown")
-                await asyncio.sleep(0.2)
-                await page.keyboard.press("Enter")
-
-            await asyncio.sleep(0.5)
-            logger.info("KuwaitAirways: airport %s → %s", direction, iata)
-            return True
+            }""", [sel_id, iata])
+            if ok:
+                logger.info("KuwaitAirways: airport %s → %s", direction, iata)
+                return True
+            logger.warning("KuwaitAirways: Selectize setValue failed for %s=%s", direction, iata)
+            return False
         except Exception as e:
             logger.warning("KuwaitAirways: airport fill error for %s: %s", iata, e)
             return False
@@ -374,55 +353,20 @@ class KuwaitAirwaysConnectorClient:
             dt = req.date_from if isinstance(req.date_from, (datetime, date)) else datetime.strptime(str(req.date_from), "%Y-%m-%d")
         except (ValueError, TypeError):
             return False
-        target_day = str(dt.day)
-        target_ym = dt.strftime("%Y-%m")
         try:
-            await page.evaluate("""() => {
-                const inputs = document.querySelectorAll(
-                    'input[name*="date"], input[name*="Date"], input[placeholder*="Date"], ' +
-                    'input[placeholder*="日期"], input[class*="date"], #departDate, #goDate, ' +
-                    '[class*="depart-date"], [class*="departure-date"]'
-                );
-                for (const i of inputs) { if (i.offsetHeight > 0) { i.click(); return; } }
-            }""")
-            await asyncio.sleep(1.5)
-
-            for _ in range(12):
-                month_text = await page.evaluate("""() => {
-                    const h = document.querySelectorAll(
-                        '[class*="calendar"] [class*="month"], [class*="calendar"] [class*="title"], ' +
-                        '.month-title, .calendar-title, th[colspan]'
-                    );
-                    return [...h].map(e => e.textContent.trim()).join('|');
-                }""")
-                if target_ym in month_text or dt.strftime("%B %Y").lower() in month_text.lower() or f"{dt.year}年{dt.month}月" in month_text:
-                    break
-                await page.evaluate("""() => {
-                    const n = document.querySelector(
-                        '[class*="next"], [aria-label*="next"], [class*="forward"], ' +
-                        'button[class*="arrow-right"], .next-month, [class*="right-arrow"]'
-                    );
-                    if (n && n.offsetHeight > 0) n.click();
-                }""")
-                await asyncio.sleep(0.5)
-
-            clicked = await page.evaluate("""(day) => {
-                const cells = document.querySelectorAll(
-                    'td[class*="day"], td[role="gridcell"], [class*="calendar-day"], ' +
-                    '[class*="date-cell"], .day, td.available'
-                );
-                for (const c of cells) {
-                    const text = c.textContent.trim();
-                    if (text === day && !c.classList.contains('disabled') &&
-                        c.getAttribute('aria-disabled') !== 'true' && c.offsetHeight > 0) {
-                        c.click(); return true;
-                    }
+            # Kuwait Airways uses DD/MM/YYYY format; set value directly via JS
+            date_str = dt.strftime("%d/%m/%Y")
+            await page.evaluate("""(dateStr) => {
+                const el = document.querySelector('#BookAFlightDates');
+                if (el) {
+                    el.value = dateStr;
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
                 }
-                return false;
-            }""", target_day)
-            if clicked:
-                logger.info("KuwaitAirways: date selected %s", dt.strftime("%Y-%m-%d"))
-            await asyncio.sleep(1.0)
+                const hid = document.querySelector('#hidInstDateSel');
+                if (hid) hid.value = dateStr;
+            }""", date_str)
+            logger.info("KuwaitAirways: date selected %s", dt.strftime("%Y-%m-%d"))
+            await asyncio.sleep(0.5)
             return True
         except Exception as e:
             logger.warning("KuwaitAirways: date error: %s", e)
@@ -553,35 +497,78 @@ class KuwaitAirwaysConnectorClient:
         return datetime.now()
 
     async def _scrape_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
-        await asyncio.sleep(3)
+        await asyncio.sleep(5)
+        # Amadeus NDB (digital.kuwaitairways.com) uses Angular with specific CSS classes
         flights = await page.evaluate(r"""(params) => {
             const [origin, destination] = params;
             const results = [];
-            const cards = document.querySelectorAll(
-                '[class*="flight-card"], [class*="flight-row"], [class*="itinerary"], ' +
-                '[class*="result-card"], [class*="bound"], [class*="flight-item"], ' +
-                '[class*="flightInfo"], [class*="flight_item"]'
-            );
+
+            // Amadeus NDB flight cards
+            const cards = document.querySelectorAll('.flight-card-pres');
             for (const card of cards) {
-                const text = card.innerText || '';
-                if (text.length < 20) continue;
-                const times = text.match(/\b(\d{1,2}:\d{2})\b/g) || [];
-                if (times.length < 2) continue;
-                const priceMatch = text.match(/(CNY|USD|EUR|¥|\$|€)\s*[\d,]+\.?\d*/i) ||
-                                   text.match(/[\d,]+\.?\d*\s*(CNY|USD|EUR|¥|\$|€)/i);
+                const depTime = (card.querySelector('.bound-departure-time') || {}).innerText || '';
+                const arrTime = (card.querySelector('.bound-arrival-time') || {}).innerText || '';
+                const depTimeMatch = depTime.match(/(\d{1,2}:\d{2})/);
+                const arrTimeMatch = arrTime.match(/(\d{1,2}:\d{2})/);
+                if (!depTimeMatch || !arrTimeMatch) continue;
+
+                const priceEl = card.querySelector('.flight-price');
+                const priceText = priceEl ? priceEl.innerText : '';
+                const priceMatch = priceText.match(/([\d,]+\.?\d*)/);
                 if (!priceMatch) continue;
-                const priceStr = priceMatch[0].replace(/[^0-9.]/g, '');
-                const price = parseFloat(priceStr);
+                const price = parseFloat(priceMatch[1].replace(/,/g, ''));
                 if (!price || price <= 0) continue;
-                let currency = 'CNY';
-                if (/USD|\$/.test(priceMatch[0])) currency = 'USD';
-                else if (/EUR|€/.test(priceMatch[0])) currency = 'EUR';
-                const fnMatch = text.match(/\b(CA\s*\d{2,4})\b/i);
+
+                let currency = 'KWD';
+                if (/USD|\$/.test(priceText)) currency = 'USD';
+                else if (/EUR|€/.test(priceText)) currency = 'EUR';
+                else if (/KWD/.test(priceText)) currency = 'KWD';
+
+                const fnEl = card.querySelector('.flight-number');
+                const fnText = fnEl ? fnEl.innerText.trim() : '';
+                const fnMatch = fnText.match(/\b(KU\s*\d{2,4})\b/i);
+
+                const durEl = card.querySelector('.flight-duration');
+                const durText = durEl ? durEl.innerText.trim() : '';
+
                 results.push({
-                    depTime: times[0], arrTime: times[1], price, currency,
-                    flightNo: fnMatch ? fnMatch[1].replace(/\s/g, '') : 'CA',
+                    depTime: depTimeMatch[1],
+                    arrTime: arrTimeMatch[1],
+                    price, currency,
+                    flightNo: fnMatch ? fnMatch[1].replace(/\s/g, '') : 'KU',
+                    duration: durText
                 });
             }
+
+            // Fallback: generic selectors if no Amadeus NDB cards found
+            if (results.length === 0) {
+                const genericCards = document.querySelectorAll(
+                    '[class*="flight-card"], [class*="flight-row"], [class*="itinerary"], ' +
+                    '[class*="result-card"], [class*="bound"], [class*="flight-item"], ' +
+                    '[class*="flightInfo"], [class*="flight_item"]'
+                );
+                for (const card of genericCards) {
+                    const text = card.innerText || '';
+                    if (text.length < 20) continue;
+                    const times = text.match(/\b(\d{1,2}:\d{2})\b/g) || [];
+                    if (times.length < 2) continue;
+                    const pm = text.match(/(KWD|USD|EUR|\$|€)\s*[\d,]+\.?\d*/i) ||
+                               text.match(/[\d,]+\.?\d*\s*(KWD|USD|EUR|\$|€)/i);
+                    if (!pm) continue;
+                    const ps = pm[0].replace(/[^0-9.]/g, '');
+                    const p = parseFloat(ps);
+                    if (!p || p <= 0) continue;
+                    let cur = 'KWD';
+                    if (/USD|\$/.test(pm[0])) cur = 'USD';
+                    else if (/EUR|€/.test(pm[0])) cur = 'EUR';
+                    const fn = text.match(/\b(KU\s*\d{2,4})\b/i);
+                    results.push({
+                        depTime: times[0], arrTime: times[1], price: p, currency: cur,
+                        flightNo: fn ? fn[1].replace(/\s/g, '') : 'KU',
+                    });
+                }
+            }
+
             return results;
         }""", [req.origin, req.destination])
 
@@ -640,8 +627,28 @@ class KuwaitAirwaysConnectorClient:
             date_str = ""
         return f"https://www.kuwaitairways.com/en?from={req.origin}&to={req.destination}&date={date_str}"
 
+    @staticmethod
+    def _combine_rt(ob: list, ib: list, req) -> list:
+        combos = []
+        for o in sorted(ob, key=lambda x: x.price)[:15]:
+            for i in sorted(ib, key=lambda x: x.price)[:10]:
+                combos.append(FlightOffer(
+                    id=f"ku_rt_{o.id}_{i.id}",
+                    price=round(o.price + i.price, 2),
+                    currency=o.currency,
+                    outbound=o.outbound,
+                    inbound=i.outbound,
+                    owner_airline=o.owner_airline,
+                    airlines=list(set(o.airlines + i.airlines)),
+                    source=o.source,
+                    booking_url=o.booking_url,
+                    conditions=o.conditions,
+                ))
+        combos.sort(key=lambda x: x.price)
+        return combos[:20]
+
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
-        search_hash = hashlib.md5(f"kuwaitairways{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        search_hash = hashlib.md5(f"kuwaitairways{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{search_hash}", origin=req.origin, destination=req.destination,
             currency=self.DEFAULT_CURRENCY, offers=[], total_results=0,

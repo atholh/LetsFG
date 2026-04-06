@@ -39,13 +39,14 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import auto_block_if_proxied, proxy_chrome_args
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,7 @@ async def _get_browser():
                     f"--user-data-dir={_USER_DATA_DIR}",
                     "--window-size=1366,768",
                     "--no-first-run",
+                    *proxy_chrome_args(),
                     "--no-default-browser-check",
                     "--disable-blink-features=AutomationControlled",
                     "--window-position=-2400,-2400",
@@ -222,12 +224,12 @@ class JetstarConnectorClient:
             f"&departuredate1={dep}&ADT={adults}"
         )
 
+        ob_offers = None
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
-                offers = await self._attempt_search(search_url, req)
-                if offers is not None:
-                    elapsed = time.monotonic() - t0
-                    return self._build_response(offers, req, elapsed)
+                ob_offers = await self._attempt_search(search_url, req)
+                if ob_offers is not None:
+                    break
                 logger.warning(
                     "Jetstar: attempt %d/%d got no results or blocked",
                     attempt, _MAX_ATTEMPTS,
@@ -238,7 +240,34 @@ class JetstarConnectorClient:
                     await _reset_browser()
                     await asyncio.sleep(2.0)
 
-        return self._empty(req)
+        if not ob_offers:
+            return self._empty(req)
+
+        # --- RT: second search for inbound ---
+        if req.return_from:
+            ret = req.return_from.strftime("%Y-%m-%d")
+            ib_url = (
+                f"https://booking.jetstar.com/au/en/booking/search-flights"
+                f"?origin1={req.destination}&destination1={req.origin}"
+                f"&departuredate1={ret}&ADT={adults}"
+            )
+            ib_req = req.model_copy(update={
+                "origin": req.destination,
+                "destination": req.origin,
+                "date_from": req.return_from,
+                "return_from": None,
+            })
+            for attempt in range(1, _MAX_ATTEMPTS + 1):
+                try:
+                    ib_offers = await self._attempt_search(ib_url, ib_req)
+                    if ib_offers is not None:
+                        ob_offers = self._combine_rt(ob_offers, ib_offers, req)
+                        break
+                except Exception:
+                    pass
+
+        elapsed = time.monotonic() - t0
+        return self._build_response(ob_offers, req, elapsed)
 
     async def _attempt_search(
         self, url: str, req: FlightSearchRequest
@@ -258,6 +287,7 @@ class JetstarConnectorClient:
                 service_workers="block",
             )
         page = await context.new_page()
+        await auto_block_if_proxied(page)
 
         try:
             # Kasada warm-up: visit base booking page first to acquire
@@ -912,7 +942,7 @@ class JetstarConnectorClient:
     def _build_response(self, offers: list[FlightOffer], req: FlightSearchRequest, elapsed: float) -> FlightSearchResponse:
         offers.sort(key=lambda o: o.price)
         logger.info("Jetstar %s->%s returned %d offers in %.1fs (Playwright)", req.origin, req.destination, len(offers), elapsed)
-        h = hashlib.md5(f"jetstar{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        h = hashlib.md5(f"jetstar{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
             currency="AUD", offers=offers, total_results=len(offers),
@@ -934,6 +964,47 @@ class JetstarConnectorClient:
                 continue
         return datetime(2000, 1, 1)
 
+    def _combine_rt(
+        self,
+        ob_offers: list[FlightOffer],
+        ib_offers: list[FlightOffer],
+        req: FlightSearchRequest,
+    ) -> list[FlightOffer]:
+        """Cross-multiply OB x IB one-way offers into RT combos."""
+        ob_sorted = sorted(ob_offers, key=lambda o: o.price)[:15]
+        ib_sorted = sorted(ib_offers, key=lambda o: o.price)[:10]
+        dep = req.date_from.strftime("%Y-%m-%d")
+        ret = req.return_from.strftime("%Y-%m-%d")
+        adults = getattr(req, "adults", 1) or 1
+        bk_url = (
+            f"https://booking.jetstar.com/au/en/booking/search-flights"
+            f"?origin1={req.origin}&destination1={req.destination}"
+            f"&departuredate1={dep}&origin2={req.destination}&destination2={req.origin}"
+            f"&departuredate2={ret}&ADT={adults}"
+        )
+        combined: list[FlightOffer] = []
+        for ob in ob_sorted:
+            for ib in ib_sorted:
+                total = round(ob.price + ib.price, 2)
+                key = f"{ob.id}_{ib.id}"
+                cid = f"jq_rt_{hashlib.md5(key.encode()).hexdigest()[:12]}"
+                combined.append(FlightOffer(
+                    id=cid,
+                    price=total,
+                    currency="AUD",
+                    price_formatted=f"${total:.2f} AUD",
+                    outbound=ob.outbound,
+                    inbound=ib.outbound,
+                    airlines=list(set(ob.airlines + ib.airlines)),
+                    owner_airline="JQ",
+                    booking_url=bk_url,
+                    is_locked=False,
+                    source="jetstar_direct",
+                    source_tier="free",
+                ))
+        combined.sort(key=lambda o: o.price)
+        return combined
+
     @staticmethod
     def _build_booking_url(req: FlightSearchRequest) -> str:
         dep = req.date_from.strftime("%Y-%m-%d")
@@ -945,7 +1016,7 @@ class JetstarConnectorClient:
         )
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
-        h = hashlib.md5(f"jetstar{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        h = hashlib.md5(f"jetstar{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
             currency="AUD", offers=[], total_results=0,

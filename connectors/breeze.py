@@ -27,13 +27,14 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import auto_block_if_proxied
 
 logger = logging.getLogger(__name__)
 
@@ -122,19 +123,29 @@ class BreezeConnectorClient:
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         try:
-            offers = await self._search_via_browser(req)
+            ob_offers = await self._search_via_browser(req)
             elapsed = time.monotonic() - t0
             logger.info(
                 "Breeze: %s→%s on %s — %d offers in %.1fs",
-                req.origin, req.destination, req.date_from, len(offers), elapsed,
+                req.origin, req.destination, req.date_from, len(ob_offers), elapsed,
             )
+
+            if req.return_from and ob_offers:
+                ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+                try:
+                    ib_offers = await self._search_via_browser(ib_req)
+                except Exception:
+                    ib_offers = []
+                if ib_offers:
+                    ob_offers = self._combine_rt(ob_offers, ib_offers, req)
+
             return FlightSearchResponse(
                 origin=req.origin,
                 destination=req.destination,
                 currency="USD",
-                offers=offers,
-                total_results=len(offers),
-                search_id=f"breeze_{req.origin}_{req.destination}_{req.date_from}",
+                offers=ob_offers,
+                total_results=len(ob_offers),
+                search_id=f"breeze_{req.origin}_{req.destination}_{req.date_from}_{req.return_from or ''}",
             )
         except Exception as e:
             logger.error("Breeze search error: %s", e)
@@ -150,6 +161,7 @@ class BreezeConnectorClient:
         )
         try:
             page = await context.new_page()
+            await auto_block_if_proxied(page)
             try:
                 from playwright_stealth import stealth_async
                 await stealth_async(page)
@@ -367,6 +379,26 @@ class BreezeConnectorClient:
             return None
 
     @staticmethod
+    def _combine_rt(ob: list, ib: list, req) -> list:
+        combos = []
+        for o in sorted(ob, key=lambda x: x.price)[:15]:
+            for i in sorted(ib, key=lambda x: x.price)[:10]:
+                combos.append(FlightOffer(
+                    id=f"mx_rt_{o.id}_{i.id}",
+                    price=round(o.price + i.price, 2),
+                    currency=o.currency,
+                    outbound=o.outbound,
+                    inbound=i.outbound,
+                    owner_airline=o.owner_airline,
+                    airlines=list(set(o.airlines + i.airlines)),
+                    source=o.source,
+                    booking_url=o.booking_url,
+                    conditions=o.conditions,
+                ))
+        combos.sort(key=lambda x: x.price)
+        return combos[:20]
+
+    @staticmethod
     def _empty(req: FlightSearchRequest) -> FlightSearchResponse:
         return FlightSearchResponse(
             origin=req.origin,
@@ -374,5 +406,5 @@ class BreezeConnectorClient:
             currency="USD",
             offers=[],
             total_results=0,
-            search_id=f"breeze_{req.origin}_{req.destination}_{req.date_from}",
+            search_id=f"breeze_{req.origin}_{req.destination}_{req.date_from}_{req.return_from or ''}",
         )

@@ -166,14 +166,27 @@ class AveloConnectorClient:
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         try:
-            offers = await self._search_via_playwright(req)
+            ob_offers = await self._search_via_playwright(req)
+
+            # --- RT: second OW search for inbound ---
+            if req.return_from and ob_offers:
+                ib_req = req.model_copy(update={
+                    "origin": req.destination,
+                    "destination": req.origin,
+                    "date_from": req.return_from,
+                    "return_from": None,
+                })
+                ib_offers = await self._search_via_playwright(ib_req)
+                if ib_offers:
+                    ob_offers = self._combine_rt(ob_offers, ib_offers, req)
+
             return FlightSearchResponse(
                 search_id=f"avelo_{req.origin}_{req.destination}_{req.date_from.strftime('%Y%m%d')}",
                 origin=req.origin,
                 destination=req.destination,
                 currency="USD",
-                offers=offers,
-                total_results=len(offers),
+                offers=ob_offers,
+                total_results=len(ob_offers),
             )
         except Exception as e:
             logger.error("Avelo search error: %s", e)
@@ -347,6 +360,44 @@ class AveloConnectorClient:
 
         logger.info("Avelo: extracted %d offers for %s->%s", len(offers), req.origin, req.destination)
         return offers
+
+    def _combine_rt(
+        self,
+        ob_offers: list[FlightOffer],
+        ib_offers: list[FlightOffer],
+        req: FlightSearchRequest,
+    ) -> list[FlightOffer]:
+        """Cross-multiply OB x IB one-way offers into RT combos."""
+        ob_sorted = sorted(ob_offers, key=lambda o: o.price)[:15]
+        ib_sorted = sorted(ib_offers, key=lambda o: o.price)[:10]
+        date_str = req.date_from.strftime("%Y-%m-%d")
+        ret_str = req.return_from.strftime("%Y-%m-%d")
+        bk_url = _BOOKING_URL_TPL.format(
+            origin=req.origin, dest=req.destination,
+            date=date_str, adults=req.adults,
+        ) + f"&returnDate={ret_str}"
+        combined: list[FlightOffer] = []
+        for ob in ob_sorted:
+            for ib in ib_sorted:
+                total = round(ob.price + ib.price, 2)
+                key = f"{ob.id}_{ib.id}"
+                cid = f"xp_rt_{hashlib.md5(key.encode()).hexdigest()[:12]}"
+                combined.append(FlightOffer(
+                    id=cid,
+                    price=total,
+                    currency="USD",
+                    price_formatted=f"${total:.2f}",
+                    outbound=ob.outbound,
+                    inbound=ib.outbound,
+                    airlines=["Avelo"],
+                    owner_airline="XP",
+                    booking_url=bk_url,
+                    is_locked=False,
+                    source="avelo_direct",
+                    source_tier="free",
+                ))
+        combined.sort(key=lambda o: o.price)
+        return combined
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         return FlightSearchResponse(

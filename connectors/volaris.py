@@ -29,13 +29,14 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import auto_block_if_proxied
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,16 @@ class VolarisConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         browser = await _get_browser()
         context = await browser.new_context(
@@ -112,9 +123,11 @@ class VolarisConnectorClient:
             try:
                 from playwright_stealth import stealth_async
                 page = await context.new_page()
+                await auto_block_if_proxied(page)
                 await stealth_async(page)
             except ImportError:
                 page = await context.new_page()
+                await auto_block_if_proxied(page)
 
             try:
                 cdp = await context.new_cdp_session(page)
@@ -611,7 +624,7 @@ class VolarisConnectorClient:
     def _build_response(self, offers: list[FlightOffer], req: FlightSearchRequest, elapsed: float) -> FlightSearchResponse:
         offers.sort(key=lambda o: o.price)
         logger.info("Volaris %s->%s returned %d offers in %.1fs (Playwright)", req.origin, req.destination, len(offers), elapsed)
-        h = hashlib.md5(f"volaris{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        h = hashlib.md5(f"volaris{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
             currency=offers[0].currency if offers else (req.currency or "MXN"),
@@ -643,8 +656,28 @@ class VolarisConnectorClient:
             f"&departure={dep}&adults={req.adults}&children={req.children}"
         )
 
+    @staticmethod
+    def _combine_rt(ob: list, ib: list, req) -> list:
+        combos = []
+        for o in sorted(ob, key=lambda x: x.price)[:15]:
+            for i in sorted(ib, key=lambda x: x.price)[:10]:
+                combos.append(FlightOffer(
+                    id=f"y4_rt_{o.id}_{i.id}",
+                    price=round(o.price + i.price, 2),
+                    currency=o.currency,
+                    outbound=o.outbound,
+                    inbound=i.outbound,
+                    owner_airline=o.owner_airline,
+                    airlines=list(set(o.airlines + i.airlines)),
+                    source=o.source,
+                    booking_url=o.booking_url,
+                    conditions=o.conditions,
+                ))
+        combos.sort(key=lambda x: x.price)
+        return combos[:20]
+
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
-        h = hashlib.md5(f"volaris{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        h = hashlib.md5(f"volaris{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
             currency=req.currency or "MXN", offers=[], total_results=0,

@@ -150,6 +150,29 @@ async def _reset_profile():
 
 async def _dismiss_overlays(page) -> None:
     try:
+        # Handle Air Europa language/country modal — must be dismissed first
+        await page.evaluate("""() => {
+            // Try to close the language modal by clicking the X button or confirm button
+            const langModal = document.querySelector('#dxa-language-modal, common-select-language');
+            if (langModal && langModal.offsetHeight > 0) {
+                // Look for a "Continue" or "Confirm" or close button inside the modal
+                const btns = langModal.querySelectorAll('button');
+                for (const b of btns) {
+                    const t = (b.textContent || '').trim().toLowerCase();
+                    if (t.includes('confirm') || t.includes('continue') || t.includes('accept') || t.includes('save')) {
+                        b.click(); return;
+                    }
+                }
+                // Fallback: click any close/X button
+                const closeBtn = langModal.querySelector('button.close, button[mat-dialog-close], .mat-mdc-dialog-actions button');
+                if (closeBtn) { closeBtn.click(); return; }
+                // Last resort: remove the modal overlay entirely
+                const overlay = document.querySelector('.cdk-overlay-container');
+                if (overlay) overlay.innerHTML = '';
+            }
+        }""")
+        await asyncio.sleep(1.0)
+
         await page.evaluate("""() => {
             const accept = document.querySelector('#onetrust-accept-btn-handler');
             if (accept && accept.offsetHeight > 0) { accept.click(); return; }
@@ -188,6 +211,16 @@ class AirEuropaConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
 
         # ── City code expansion (LON → LHR, BCN stays BCN) ──
@@ -347,7 +380,7 @@ class AirEuropaConnectorClient:
             logger.info("AirEuropa %s→%s: %d offers in %.1fs", req.origin, req.destination, len(offers), elapsed)
 
             search_hash = hashlib.md5(
-                f"aireuropa{req.origin}{req.destination}{req.date_from}".encode()
+                f"aireuropa{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
             ).hexdigest()[:12]
             currency = offers[0].currency if offers else self.DEFAULT_CURRENCY
             return FlightSearchResponse(
@@ -688,8 +721,28 @@ class AirEuropaConnectorClient:
             date_str = ""
         return f"https://www.aireuropa.com/en/flights?from={req.origin}&to={req.destination}&date={date_str}"
 
+    @staticmethod
+    def _combine_rt(ob: list, ib: list, req) -> list:
+        combos = []
+        for o in sorted(ob, key=lambda x: x.price)[:15]:
+            for i in sorted(ib, key=lambda x: x.price)[:10]:
+                combos.append(FlightOffer(
+                    id=f"ux_rt_{o.id}_{i.id}",
+                    price=round(o.price + i.price, 2),
+                    currency=o.currency,
+                    outbound=o.outbound,
+                    inbound=i.outbound,
+                    owner_airline=o.owner_airline,
+                    airlines=list(set(o.airlines + i.airlines)),
+                    source=o.source,
+                    booking_url=o.booking_url,
+                    conditions=o.conditions,
+                ))
+        combos.sort(key=lambda x: x.price)
+        return combos[:20]
+
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
-        search_hash = hashlib.md5(f"aireuropa{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        search_hash = hashlib.md5(f"aireuropa{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{search_hash}", origin=req.origin, destination=req.destination,
             currency=self.DEFAULT_CURRENCY, offers=[], total_results=0,

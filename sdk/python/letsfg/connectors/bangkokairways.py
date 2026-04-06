@@ -353,9 +353,8 @@ def _parse(data: dict, req: FlightSearchRequest) -> list[FlightOffer]:
             oid = hashlib.md5(key.encode()).hexdigest()[:12]
 
             booking_url = (
-                f"https://digital.bangkokair.com/booking"
-                f"?lang=en-GB&origin={req.origin}&destination={req.destination}"
-                f"&departureDate={req.date_from.isoformat()}"
+                f"https://www.bangkokair.com/flight/booking"
+                f"?origin={req.origin}&destination={req.destination}"
             )
 
             offers.append(FlightOffer(
@@ -379,6 +378,47 @@ def _parse(data: dict, req: FlightSearchRequest) -> list[FlightOffer]:
             ))
 
     return offers
+
+
+def _combine_rt(
+    ob_offers: list[FlightOffer],
+    ib_offers: list[FlightOffer],
+    req: FlightSearchRequest,
+) -> list[FlightOffer]:
+    """Cross-multiply OB x IB into RT combo offers."""
+    ob_sorted = sorted(ob_offers, key=lambda o: o.price)[:15]
+    ib_sorted = sorted(ib_offers, key=lambda o: o.price)[:10]
+    date_str = req.date_from.strftime("%Y-%m-%d")
+    ret_str = req.return_from.strftime("%Y-%m-%d")
+    bk_url = (
+        f"https://www.bangkokair.com/flight/booking"
+        f"?origin={req.origin}&destination={req.destination}"
+        f"&departDate={date_str}&returnDate={ret_str}&tripType=R"
+    )
+    combined: list[FlightOffer] = []
+    for ob in ob_sorted:
+        for ib in ib_sorted:
+            total = round(ob.price + ib.price, 2)
+            cur = ob.currency or ib.currency or "THB"
+            key = f"{ob.id}_{ib.id}"
+            cid = f"pg_rt_{hashlib.md5(key.encode()).hexdigest()[:12]}"
+            combined.append(FlightOffer(
+                id=cid,
+                price=total,
+                currency=cur,
+                price_formatted=f"{total:.0f} {cur}",
+                outbound=ob.outbound,
+                inbound=ib.outbound,
+                airlines=list(set(ob.airlines + ib.airlines)),
+                owner_airline="PG",
+                conditions=ob.conditions,
+                booking_url=bk_url,
+                is_locked=False,
+                source="bangkokairways_direct",
+                source_tier="free",
+            ))
+    combined.sort(key=lambda o: o.price)
+    return combined
 
 
 class BangkokAirwaysConnectorClient:
@@ -421,6 +461,18 @@ class BangkokAirwaysConnectorClient:
                 return self._empty(req)
 
             offers = _parse(data, req)
+
+            # --- RT: second API call for inbound ---
+            if req.return_from and offers:
+                ret_date = req.return_from.isoformat()
+                ib_data = await _api_search(
+                    api_page, token, req.destination, req.origin, ret_date,
+                )
+                if ib_data:
+                    ib_offers = _parse(ib_data, req)
+                    if ib_offers:
+                        offers = _combine_rt(offers, ib_offers, req)
+
             offers.sort(key=lambda o: o.price)
 
             elapsed = time.monotonic() - t0

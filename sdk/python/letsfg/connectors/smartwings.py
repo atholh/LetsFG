@@ -160,17 +160,39 @@ class SmartwingsConnectorClient:
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
+        result = self._empty(req)
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
                 result = await self._attempt_search(req, t0)
                 if result.total_results > 0 or attempt == _MAX_ATTEMPTS:
-                    return result
+                    break
                 logger.warning("Smartwings: attempt %d got 0 offers, retrying", attempt)
             except Exception as e:
                 logger.error("Smartwings: attempt %d error: %s", attempt, e)
                 if attempt == _MAX_ATTEMPTS:
                     return self._empty(req)
-        return self._empty(req)
+
+        # --- RT: second search for inbound ---
+        if req.return_from and result.total_results > 0:
+            ib_req = req.model_copy(update={
+                "origin": req.destination,
+                "destination": req.origin,
+                "date_from": req.return_from,
+                "return_from": None,
+            })
+            for attempt in range(1, _MAX_ATTEMPTS + 1):
+                try:
+                    ib_result = await self._attempt_search(ib_req, t0)
+                    if ib_result.total_results > 0:
+                        result.offers = self._combine_rt(
+                            result.offers, ib_result.offers, req,
+                        )
+                        result.total_results = len(result.offers)
+                        break
+                except Exception:
+                    pass
+
+        return result
 
     async def _attempt_search(self, req: FlightSearchRequest, t0: float) -> FlightSearchResponse:
         browser = await _get_browser()
@@ -568,6 +590,46 @@ class SmartwingsConnectorClient:
             offers=offers,
             total_results=len(offers),
         )
+
+    def _combine_rt(
+        self,
+        ob_offers: list[FlightOffer],
+        ib_offers: list[FlightOffer],
+        req: FlightSearchRequest,
+    ) -> list[FlightOffer]:
+        """Cross-multiply OB x IB one-way offers into RT combos."""
+        ob_sorted = sorted(ob_offers, key=lambda o: o.price)[:15]
+        ib_sorted = sorted(ib_offers, key=lambda o: o.price)[:10]
+        dep = req.date_from.strftime("%Y-%m-%d")
+        ret = req.return_from.strftime("%Y-%m-%d")
+        bk_url = (
+            f"https://www.smartwings.com/en/flights?from={req.origin}"
+            f"&to={req.destination}&departure={dep}&return={ret}"
+            f"&adults={req.adults}&children={req.children}&infants={req.infants}"
+        )
+        combined: list[FlightOffer] = []
+        for ob in ob_sorted:
+            for ib in ib_sorted:
+                total = round(ob.price + ib.price, 2)
+                cur = ob.currency or ib.currency or "EUR"
+                key = f"{ob.id}_{ib.id}"
+                cid = f"qs_rt_{hashlib.md5(key.encode()).hexdigest()[:12]}"
+                combined.append(FlightOffer(
+                    id=cid,
+                    price=total,
+                    currency=cur,
+                    price_formatted=f"{total:.2f} EUR",
+                    outbound=ob.outbound,
+                    inbound=ib.outbound,
+                    airlines=["Smartwings"],
+                    owner_airline="QS",
+                    booking_url=bk_url,
+                    is_locked=False,
+                    source="smartwings_direct",
+                    source_tier="free",
+                ))
+        combined.sort(key=lambda o: o.price)
+        return combined
 
     @staticmethod
     def _build_booking_url(req: FlightSearchRequest) -> str:

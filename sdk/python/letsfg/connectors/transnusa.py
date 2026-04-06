@@ -179,6 +179,16 @@ class TransNusaConnectorClient:
         pass  # Browser is shared singleton
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
 
         if req.origin not in _VALID_IATA or req.destination not in _VALID_IATA:
@@ -638,7 +648,7 @@ class TransNusaConnectorClient:
             inbound=None,
             airlines=["TransNusa"],
             owner_airline="8B",
-            booking_url=f"{_IBE_URL}?from={req.origin}&to={req.destination}&date={req.date_from}&adults={req.adults or 1}",
+            booking_url=_IBE_URL,
             is_locked=False,
             source="transnusa_direct",
             source_tier="free",
@@ -725,7 +735,7 @@ class TransNusaConnectorClient:
                 inbound=None,
                 airlines=["TransNusa"],
                 owner_airline="8B",
-                booking_url=f"{_IBE_URL}?from={req.origin}&to={req.destination}&date={req.date_from}&adults={req.adults or 1}",
+                booking_url=_IBE_URL,
                 is_locked=False,
                 source="transnusa_direct",
                 source_tier="free",
@@ -752,6 +762,26 @@ class TransNusaConnectorClient:
             except ValueError:
                 continue
         return None
+
+    @staticmethod
+    def _combine_rt(ob: list, ib: list, req) -> list:
+        combos = []
+        for o in sorted(ob, key=lambda x: x.price)[:15]:
+            for i in sorted(ib, key=lambda x: x.price)[:10]:
+                combos.append(FlightOffer(
+                    id=f"8b_rt_{o.id}_{i.id}",
+                    price=round(o.price + i.price, 2),
+                    currency=o.currency,
+                    outbound=o.outbound,
+                    inbound=i.outbound,
+                    owner_airline=o.owner_airline,
+                    airlines=list(set(o.airlines + i.airlines)),
+                    source=o.source,
+                    booking_url=o.booking_url,
+                    conditions=o.conditions,
+                ))
+        combos.sort(key=lambda x: x.price)
+        return combos[:20]
 
     @staticmethod
     def _empty(req: FlightSearchRequest) -> FlightSearchResponse:

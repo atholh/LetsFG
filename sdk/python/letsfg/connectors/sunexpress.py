@@ -126,6 +126,27 @@ class SunExpressConnectorClient:
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
+        ob_offers = await self._search_ow(req)
+
+        # --- RT: second OW search for inbound ---
+        if req.return_from and ob_offers:
+            ib_req = req.model_copy(update={
+                "origin": req.destination,
+                "destination": req.origin,
+                "date_from": req.return_from,
+                "return_from": None,
+            })
+            ib_offers = await self._search_ow(ib_req)
+            if ib_offers:
+                ob_offers = self._combine_rt(ob_offers, ib_offers, req)
+
+        elapsed = time.monotonic() - t0
+        if ob_offers:
+            return self._build_response(ob_offers, req, elapsed)
+        return self._empty(req)
+
+    async def _search_ow(self, req: FlightSearchRequest) -> list[FlightOffer]:
+        """Run one OW search via persistent Chrome form fill."""
         context = await _get_context()
 
         try:
@@ -150,7 +171,7 @@ class SunExpressConnectorClient:
                     logger.info("SunExpress: Radware challenge passed, URL = %s", page.url)
                 except Exception:
                     logger.warning("SunExpress: Radware challenge timeout (URL: %s)", page.url)
-                    return self._empty(req)
+                    return []
 
             logger.info("SunExpress: page URL = %s", page.url)
 
@@ -162,7 +183,7 @@ class SunExpressConnectorClient:
             ok = await self._fill_search_form(page, req)
             if not ok:
                 logger.warning("SunExpress: form fill failed")
-                return self._empty(req)
+                return []
 
             # ── Step 4: Navigate to results ─────────────────────────
             # Form may auto-submit after date + Escape; try waiting first
@@ -179,7 +200,7 @@ class SunExpressConnectorClient:
                         logger.info("SunExpress: Radware passed, URL = %s", page.url)
                     except Exception:
                         logger.warning("SunExpress: Radware challenge timeout on submit")
-                        return self._empty(req)
+                        return []
                 # If still not on results, try clicking search manually
                 if "/booking/select" not in page.url:
                     logger.info("SunExpress: URL after form = %s", page.url)
@@ -197,10 +218,10 @@ class SunExpressConnectorClient:
                                 pass
                         if "/booking/select" not in page.url:
                             logger.warning("SunExpress: failed to reach results (URL: %s)", page.url)
-                            return self._empty(req)
+                            return []
 
             # ── Step 5: Wait for DOM prices to load ────────────────────
-            remaining = max(self.timeout - (time.monotonic() - t0), 8)
+            remaining = max(self.timeout - 15, 8)
             prices_loaded = False
             for _ in range(int(remaining)):
                 await asyncio.sleep(1)
@@ -214,21 +235,18 @@ class SunExpressConnectorClient:
 
             if not prices_loaded:
                 logger.warning("SunExpress: prices never loaded on results page")
-                return self._empty(req)
+                return []
 
             await asyncio.sleep(1.5)
 
             # ── Step 6: Extract flights from DOM ───────────────────────
             offers = await self._extract_from_dom(page, req)
-            elapsed = time.monotonic() - t0
-            logger.info("SunExpress: extracted %d offers in %.1fs", len(offers), elapsed)
-            if offers:
-                return self._build_response(offers, req, elapsed)
-            return self._empty(req)
+            logger.info("SunExpress: extracted %d offers", len(offers))
+            return offers if offers else []
 
         except Exception as e:
             logger.error("SunExpress Playwright error: %s", e)
-            return self._empty(req)
+            return []
         finally:
             try:
                 await page.close()
@@ -596,6 +614,47 @@ class SunExpressConnectorClient:
             f"&child={getattr(req, 'children', 0) or 0}"
             f"&infant={getattr(req, 'infants', 0) or 0}"
         )
+
+    def _combine_rt(
+        self,
+        ob_offers: list[FlightOffer],
+        ib_offers: list[FlightOffer],
+        req: FlightSearchRequest,
+    ) -> list[FlightOffer]:
+        """Cross-multiply OB x IB one-way offers into RT combos."""
+        ob_sorted = sorted(ob_offers, key=lambda o: o.price)[:15]
+        ib_sorted = sorted(ib_offers, key=lambda o: o.price)[:10]
+        dep = req.date_from.strftime("%Y-%m-%d")
+        ret = req.return_from.strftime("%Y-%m-%d")
+        bk_url = (
+            f"https://www.sunexpress.com/en-gb/booking/select/"
+            f"?origin1={req.origin}&destination1={req.destination}"
+            f"&departure1={dep}&origin2={req.destination}&destination2={req.origin}"
+            f"&departure2={ret}&adult={getattr(req, 'adults', 1) or 1}"
+        )
+        combined: list[FlightOffer] = []
+        for ob in ob_sorted:
+            for ib in ib_sorted:
+                total = round(ob.price + ib.price, 2)
+                cur = ob.currency or ib.currency or "EUR"
+                key = f"{ob.id}_{ib.id}"
+                cid = f"xq_rt_{hashlib.md5(key.encode()).hexdigest()[:12]}"
+                combined.append(FlightOffer(
+                    id=cid,
+                    price=total,
+                    currency=cur,
+                    price_formatted=f"{total:.2f} {cur}",
+                    outbound=ob.outbound,
+                    inbound=ib.outbound,
+                    airlines=["SunExpress"],
+                    owner_airline="XQ",
+                    booking_url=bk_url,
+                    is_locked=False,
+                    source="sunexpress_direct",
+                    source_tier="free",
+                ))
+        combined.sort(key=lambda o: o.price)
+        return combined
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         search_hash = hashlib.md5(f"sunexpress{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]

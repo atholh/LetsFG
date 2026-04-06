@@ -24,13 +24,14 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import auto_block_if_proxied
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,7 @@ class AlaskaConnectorClient:
                 currency="USD",
                 offers=offers,
                 total_results=len(offers),
-                search_id=f"alaska_{req.origin}_{req.destination}_{req.date_from}",
+                search_id=f"alaska_{req.origin}_{req.destination}_{req.date_from}_{req.return_from or ''}",
             )
         except Exception as e:
             logger.error("Alaska search error: %s", e)
@@ -132,6 +133,7 @@ class AlaskaConnectorClient:
         )
         try:
             page = await context.new_page()
+            await auto_block_if_proxied(page)
             try:
                 from playwright_stealth import stealth_async
                 await stealth_async(page)
@@ -195,7 +197,63 @@ class AlaskaConnectorClient:
                 logger.warning("Alaska: API error: %s", result)
                 return []
 
-            return self._parse_rows(result, req)
+            ob_offers = self._parse_rows(result, req)
+
+            # --- RT: second fetch for inbound ---
+            if not req.return_from or not ob_offers:
+                return ob_offers
+
+            ret_str = req.return_from.strftime("%Y-%m-%d")
+            ib_result = await page.evaluate(
+                """async ([origin, destination, dateStr, adults]) => {
+                    try {
+                        const body = {
+                            origins: [origin],
+                            destinations: [destination],
+                            dates: [dateStr],
+                            numADTs: adults,
+                            numINFs: 0,
+                            numCHDs: 0,
+                            fareView: 'Default',
+                            onba: false,
+                            dnba: false,
+                            discount: { code: '', type: 'NONE', memo: '' },
+                            isAlaska: true,
+                            isMobileApp: false,
+                            sliceId: 0,
+                            umnrAgeGroup: 'NONE',
+                            isAddingToAdultRes: false,
+                            lockFare: false,
+                            sessionID: '',
+                            solutionIDs: [],
+                            solutionSetIDs: [],
+                            qpxcVersion: '',
+                            trackingTags: [],
+                            isAwards: false,
+                            isMultiCity: false,
+                        };
+                        const r = await fetch('/search/api/flightresults', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(body),
+                        });
+                        if (!r.ok) return { error: r.status };
+                        return await r.json();
+                    } catch (e) {
+                        return { error: e.message };
+                    }
+                }""",
+                [req.destination, req.origin, ret_str, req.adults],
+            )
+
+            if not ib_result or ib_result.get("error"):
+                return ob_offers
+
+            ib_offers = self._parse_rows(ib_result, req)
+            if not ib_offers:
+                return ob_offers
+
+            return self._combine_rt(ob_offers, ib_offers, req)
         finally:
             await context.close()
 
@@ -309,6 +367,45 @@ class AlaskaConnectorClient:
 
         return offers
 
+    def _combine_rt(
+        self,
+        ob_offers: list[FlightOffer],
+        ib_offers: list[FlightOffer],
+        req: FlightSearchRequest,
+    ) -> list[FlightOffer]:
+        """Cross-multiply OB x IB one-way offers into RT combos."""
+        ob_sorted = sorted(ob_offers, key=lambda o: o.price)[:15]
+        ib_sorted = sorted(ib_offers, key=lambda o: o.price)[:10]
+        date_str = req.date_from.strftime("%Y-%m-%d")
+        ret_str = req.return_from.strftime("%Y-%m-%d")
+        bk_url = (
+            f"https://www.alaskaair.com/search/results"
+            f"?A={req.adults}&OD1={req.origin},{req.destination},{date_str}"
+            f"&OD2={req.destination},{req.origin},{ret_str}"
+        )
+        combined: list[FlightOffer] = []
+        for ob in ob_sorted:
+            for ib in ib_sorted:
+                total = round(ob.price + ib.price, 2)
+                key = f"{ob.id}_{ib.id}"
+                cid = f"as_rt_{hashlib.md5(key.encode()).hexdigest()[:12]}"
+                combined.append(FlightOffer(
+                    id=cid,
+                    price=total,
+                    currency="USD",
+                    price_formatted=f"${total:.2f}",
+                    outbound=ob.outbound,
+                    inbound=ib.outbound,
+                    airlines=list(set(ob.airlines + ib.airlines)),
+                    owner_airline="AS",
+                    booking_url=bk_url,
+                    is_locked=False,
+                    source="alaska_direct",
+                    source_tier="free",
+                ))
+        combined.sort(key=lambda o: o.price)
+        return combined
+
     @staticmethod
     def _empty(req: FlightSearchRequest) -> FlightSearchResponse:
         return FlightSearchResponse(
@@ -317,5 +414,5 @@ class AlaskaConnectorClient:
             currency="USD",
             offers=[],
             total_results=0,
-            search_id=f"alaska_{req.origin}_{req.destination}_{req.date_from}",
+            search_id=f"alaska_{req.origin}_{req.destination}_{req.date_from}_{req.return_from or ''}",
         )

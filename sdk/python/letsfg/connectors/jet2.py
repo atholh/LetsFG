@@ -124,6 +124,18 @@ class Jet2ConnectorClient:
         Each search launches a fresh headless Chrome with a unique temp directory,
         performs the search, and cleans up. Safe for Cloud Run and parallel execution.
         """
+        ob_result = await self._search_ow(req)
+
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         # ── City code expansion (LON → STN, LGW, etc.) ──
         origins = [a for a in get_city_airports(req.origin) if a in _STATIC_SLUGS]
         destinations = [a for a in get_city_airports(req.destination) if a in _STATIC_SLUGS]
@@ -638,6 +650,26 @@ class Jet2ConnectorClient:
             offers=offers,
             total_results=len(offers),
         )
+
+    @staticmethod
+    def _combine_rt(ob: list, ib: list, req) -> list:
+        combos = []
+        for o in sorted(ob, key=lambda x: x.price)[:15]:
+            for i in sorted(ib, key=lambda x: x.price)[:10]:
+                combos.append(FlightOffer(
+                    id=f"ls_rt_{o.id}_{i.id}",
+                    price=round(o.price + i.price, 2),
+                    currency=o.currency,
+                    outbound=o.outbound,
+                    inbound=i.outbound,
+                    owner_airline=o.owner_airline,
+                    airlines=list(set(o.airlines + i.airlines)),
+                    source=o.source,
+                    booking_url=o.booking_url,
+                    conditions=o.conditions,
+                ))
+        combos.sort(key=lambda x: x.price)
+        return combos[:20]
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         search_hash = hashlib.md5(

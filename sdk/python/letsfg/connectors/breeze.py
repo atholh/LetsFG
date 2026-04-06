@@ -123,18 +123,28 @@ class BreezeConnectorClient:
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         try:
-            offers = await self._search_via_browser(req)
+            ob_offers = await self._search_via_browser(req)
             elapsed = time.monotonic() - t0
             logger.info(
                 "Breeze: %s→%s on %s — %d offers in %.1fs",
-                req.origin, req.destination, req.date_from, len(offers), elapsed,
+                req.origin, req.destination, req.date_from, len(ob_offers), elapsed,
             )
+
+            if req.return_from and ob_offers:
+                ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+                try:
+                    ib_offers = await self._search_via_browser(ib_req)
+                except Exception:
+                    ib_offers = []
+                if ib_offers:
+                    ob_offers = self._combine_rt(ob_offers, ib_offers, req)
+
             return FlightSearchResponse(
                 origin=req.origin,
                 destination=req.destination,
                 currency="USD",
-                offers=offers,
-                total_results=len(offers),
+                offers=ob_offers,
+                total_results=len(ob_offers),
                 search_id=f"breeze_{req.origin}_{req.destination}_{req.date_from}_{req.return_from or ''}",
             )
         except Exception as e:
@@ -367,6 +377,26 @@ class BreezeConnectorClient:
             return datetime.fromisoformat(s)
         except (ValueError, TypeError):
             return None
+
+    @staticmethod
+    def _combine_rt(ob: list, ib: list, req) -> list:
+        combos = []
+        for o in sorted(ob, key=lambda x: x.price)[:15]:
+            for i in sorted(ib, key=lambda x: x.price)[:10]:
+                combos.append(FlightOffer(
+                    id=f"mx_rt_{o.id}_{i.id}",
+                    price=round(o.price + i.price, 2),
+                    currency=o.currency,
+                    outbound=o.outbound,
+                    inbound=i.outbound,
+                    owner_airline=o.owner_airline,
+                    airlines=list(set(o.airlines + i.airlines)),
+                    source=o.source,
+                    booking_url=o.booking_url,
+                    conditions=o.conditions,
+                ))
+        combos.sort(key=lambda x: x.price)
+        return combos[:20]
 
     @staticmethod
     def _empty(req: FlightSearchRequest) -> FlightSearchResponse:

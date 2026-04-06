@@ -99,14 +99,25 @@ class LuckyAirConnectorClient:
             try:
                 page = await context.new_page()
                 await auto_block_if_proxied(page)
-                offers = await self._search_via_calendar(page, req, t0)
+                ob_offers = await self._search_via_calendar(page, req, t0)
+
+                if req.return_from and ob_offers:
+                    ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+                    try:
+                        ib_page = await context.new_page()
+                        await auto_block_if_proxied(ib_page)
+                        ib_offers = await self._search_via_calendar(ib_page, ib_req, t0)
+                    except Exception:
+                        ib_offers = []
+                    if ib_offers:
+                        ob_offers = self._combine_rt(ob_offers, ib_offers, req)
 
                 elapsed = time.monotonic() - t0
-                if offers:
-                    offers.sort(key=lambda o: o.price)
+                if ob_offers:
+                    ob_offers.sort(key=lambda o: o.price)
                 logger.info(
                     "Lucky Air %s→%s returned %d offers in %.1fs",
-                    req.origin, req.destination, len(offers), elapsed,
+                    req.origin, req.destination, len(ob_offers), elapsed,
                 )
 
                 search_hash = hashlib.md5(
@@ -117,8 +128,8 @@ class LuckyAirConnectorClient:
                     origin=req.origin,
                     destination=req.destination,
                     currency=req.currency or "CNY",
-                    offers=offers,
-                    total_results=len(offers),
+                    offers=ob_offers,
+                    total_results=len(ob_offers),
                 )
             finally:
                 await context.close()
@@ -456,6 +467,26 @@ class LuckyAirConnectorClient:
             f"https://www.luckyair.net/micro/main/flight/search"
             f"?depCode={req.origin}&arrCode={req.destination}&flightDate={dep}"
         )
+
+    @staticmethod
+    def _combine_rt(ob: list, ib: list, req) -> list:
+        combos = []
+        for o in sorted(ob, key=lambda x: x.price)[:15]:
+            for i in sorted(ib, key=lambda x: x.price)[:10]:
+                combos.append(FlightOffer(
+                    id=f"8l_rt_{o.id}_{i.id}",
+                    price=round(o.price + i.price, 2),
+                    currency=o.currency,
+                    outbound=o.outbound,
+                    inbound=i.outbound,
+                    owner_airline=o.owner_airline,
+                    airlines=list(set(o.airlines + i.airlines)),
+                    source=o.source,
+                    booking_url=o.booking_url,
+                    conditions=o.conditions,
+                ))
+        combos.sort(key=lambda x: x.price)
+        return combos[:20]
 
     @staticmethod
     def _empty(req: FlightSearchRequest) -> FlightSearchResponse:

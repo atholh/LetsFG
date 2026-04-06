@@ -30,14 +30,14 @@ import urllib.parse
 from datetime import datetime, timedelta
 from typing import Optional
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from connectors.browser import find_chrome, stealth_popen_kwargs
+from .browser import find_chrome, stealth_popen_kwargs, auto_block_if_proxied
 
 logger = logging.getLogger(__name__)
 
@@ -128,9 +128,32 @@ class PeachConnectorClient:
         t0 = time.monotonic()
         browser = await _get_browser()
         context = browser.contexts[0] if browser.contexts else await browser.new_context()
+
+        ob_offers = await self._search_ow_page(context, req)
+
+        # --- RT: second OW search for inbound ---
+        if req.return_from and ob_offers:
+            ib_req = req.model_copy(update={
+                "origin": req.destination,
+                "destination": req.origin,
+                "date_from": req.return_from,
+                "return_from": None,
+            })
+            ib_offers = await self._search_ow_page(context, ib_req)
+            if ib_offers:
+                ob_offers = self._combine_rt(ob_offers, ib_offers, req)
+
+        elapsed = time.monotonic() - t0
+        if ob_offers:
+            return self._build_response(ob_offers, req, elapsed)
+        return self._empty(req)
+
+    async def _search_ow_page(self, context, req: FlightSearchRequest) -> list[FlightOffer]:
+        """Run one OW search on a fresh page (3-step Peach booking flow)."""
         page = None
         try:
             page = await context.new_page()
+            await auto_block_if_proxied(page)
 
             search_url = self._build_search_url(req)
             logger.info("Peach: navigating to booking URL for %s→%s on %s",
@@ -159,14 +182,13 @@ class PeachConnectorClient:
                 logger.info("Peach: clicked 'Search by One-way'")
             except Exception as e:
                 logger.warning("Peach: could not click one-way search (%s)", e)
-                return self._empty(req)
+                return []
 
             # Wait for flight results page
             try:
                 await page.wait_for_url("**/flight_search**", timeout=25000)
             except Exception:
                 if "flight_search" not in page.url:
-                    # Check if reCAPTCHA showed a visible challenge
                     challenge = await page.evaluate("""() => {
                         const f = document.querySelector('iframe[title*="recaptcha"]');
                         return f ? f.offsetHeight > 100 : false;
@@ -175,25 +197,22 @@ class PeachConnectorClient:
                         logger.warning("Peach: reCAPTCHA image challenge appeared — cannot auto-solve")
                     else:
                         logger.warning("Peach: did not reach flight_search (at %s)", page.url)
-                    return self._empty(req)
+                    return []
 
             # Let the page settle (avoids "execution context destroyed" from JS redirects)
             await page.wait_for_load_state("domcontentloaded")
             await asyncio.sleep(3)
 
             flights_data = await self._extract_flights_from_dom(page)
-
             if not flights_data:
                 logger.warning("Peach: no flights extracted from DOM")
-                return self._empty(req)
+                return []
 
-            elapsed = time.monotonic() - t0
-            offers = self._build_offers(flights_data, req)
-            return self._build_response(offers, req, elapsed)
+            return self._build_offers(flights_data, req)
 
         except Exception as e:
             logger.error("Peach error: %s", e)
-            return self._empty(req)
+            return []
         finally:
             if page:
                 try:
@@ -390,7 +409,7 @@ class PeachConnectorClient:
     def _build_response(self, offers: list[FlightOffer], req: FlightSearchRequest, elapsed: float) -> FlightSearchResponse:
         offers.sort(key=lambda o: o.price)
         logger.info("Peach %s→%s returned %d offers in %.1fs", req.origin, req.destination, len(offers), elapsed)
-        h = hashlib.md5(f"peach{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        h = hashlib.md5(f"peach{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
             currency="JPY", offers=offers, total_results=len(offers),
@@ -406,8 +425,47 @@ class PeachConnectorClient:
         }], separators=(",", ":"))
         return f"https://booking.flypeach.com/en/getsearch?s={urllib.parse.quote(params)}"
 
+    def _combine_rt(
+        self,
+        ob_offers: list[FlightOffer],
+        ib_offers: list[FlightOffer],
+        req: FlightSearchRequest,
+    ) -> list[FlightOffer]:
+        """Cross-multiply OB x IB one-way offers into RT combos."""
+        ob_sorted = sorted(ob_offers, key=lambda o: o.price)[:15]
+        ib_sorted = sorted(ib_offers, key=lambda o: o.price)[:10]
+        params = json.dumps([{
+            "departure_date": req.date_from.strftime("%Y/%m/%d"),
+            "departure_airport_code": req.origin,
+            "arrival_airport_code": req.destination,
+            "is_return": True,
+        }], separators=(",", ":"))
+        bk_url = f"https://booking.flypeach.com/en/getsearch?s={urllib.parse.quote(params)}"
+        combined: list[FlightOffer] = []
+        for ob in ob_sorted:
+            for ib in ib_sorted:
+                total = round(ob.price + ib.price, 2)
+                key = f"{ob.id}_{ib.id}"
+                cid = f"mm_rt_{hashlib.md5(key.encode()).hexdigest()[:12]}"
+                combined.append(FlightOffer(
+                    id=cid,
+                    price=total,
+                    currency="JPY",
+                    price_formatted=f"¥{total:,.0f}",
+                    outbound=ob.outbound,
+                    inbound=ib.outbound,
+                    airlines=["Peach Aviation"],
+                    owner_airline="MM",
+                    booking_url=bk_url,
+                    is_locked=False,
+                    source="peach_direct",
+                    source_tier="free",
+                ))
+        combined.sort(key=lambda o: o.price)
+        return combined
+
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
-        h = hashlib.md5(f"peach{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        h = hashlib.md5(f"peach{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
             currency="JPY", offers=[], total_results=0,

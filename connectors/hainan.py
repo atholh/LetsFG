@@ -27,14 +27,14 @@ import time
 from datetime import datetime, date, timedelta
 from typing import Optional
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from connectors.browser import find_chrome, stealth_popen_kwargs, _launched_procs
+from .browser import find_chrome, stealth_popen_kwargs, _launched_procs, proxy_chrome_args, auto_block_if_proxied
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,7 @@ async def _get_context():
                 f"--remote-debugging-port={_DEBUG_PORT}",
                 f"--user-data-dir={_USER_DATA_DIR}",
                 "--no-first-run",
+                *proxy_chrome_args(),
                 "--no-default-browser-check",
                 "--disable-blink-features=AutomationControlled",
                 "--window-position=-2400,-2400",
@@ -180,9 +181,20 @@ class HainanConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         context = await _get_context()
         page = await context.new_page()
+        await auto_block_if_proxied(page)
 
         search_data: dict = {}
         api_event = asyncio.Event()
@@ -295,7 +307,7 @@ class HainanConnectorClient:
             logger.info("Hainan %s→%s: %d offers in %.1fs", req.origin, req.destination, len(offers), elapsed)
 
             search_hash = hashlib.md5(
-                f"hainan{req.origin}{req.destination}{req.date_from}".encode()
+                f"hainan{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
             ).hexdigest()[:12]
             currency = offers[0].currency if offers else self.DEFAULT_CURRENCY
             return FlightSearchResponse(
@@ -640,8 +652,28 @@ class HainanConnectorClient:
             date_str = ""
         return f"https://www.hainanairlines.com/en?from={req.origin}&to={req.destination}&date={date_str}"
 
+    @staticmethod
+    def _combine_rt(ob: list, ib: list, req) -> list:
+        combos = []
+        for o in sorted(ob, key=lambda x: x.price)[:15]:
+            for i in sorted(ib, key=lambda x: x.price)[:10]:
+                combos.append(FlightOffer(
+                    id=f"hu_rt_{o.id}_{i.id}",
+                    price=round(o.price + i.price, 2),
+                    currency=o.currency,
+                    outbound=o.outbound,
+                    inbound=i.outbound,
+                    owner_airline=o.owner_airline,
+                    airlines=list(set(o.airlines + i.airlines)),
+                    source=o.source,
+                    booking_url=o.booking_url,
+                    conditions=o.conditions,
+                ))
+        combos.sort(key=lambda x: x.price)
+        return combos[:20]
+
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
-        search_hash = hashlib.md5(f"hainan{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        search_hash = hashlib.md5(f"hainan{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{search_hash}", origin=req.origin, destination=req.destination,
             currency=self.DEFAULT_CURRENCY, offers=[], total_results=0,

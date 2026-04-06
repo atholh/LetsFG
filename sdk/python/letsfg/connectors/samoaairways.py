@@ -67,9 +67,23 @@ class SamoaAirwaysConnectorClient:
 
         await acquire_browser_slot()
         try:
-            return await self._search_with_browser(req, t0)
+            ob_result = await self._search_with_browser(req, t0)
         finally:
             release_browser_slot()
+
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            if ib_req.origin in _VALID_IATA and ib_req.destination in _VALID_IATA:
+                await acquire_browser_slot()
+                try:
+                    ib_result = await self._search_with_browser(ib_req, t0)
+                finally:
+                    release_browser_slot()
+                if ib_result.total_results > 0:
+                    ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                    ob_result.total_results = len(ob_result.offers)
+
+        return ob_result
 
     async def _search_with_browser(
         self, req: FlightSearchRequest, t0: float
@@ -305,7 +319,7 @@ class SamoaAirwaysConnectorClient:
                 price_formatted=f"{currency} {price:,.2f}",
                 outbound=route, inbound=None,
                 airlines=["Samoa Airways"], owner_airline="PH",
-                booking_url=f"{_SEARCH_URL}?from={req.origin}&to={req.destination}&dd={req.date_from}&ADT={req.adults or 1}", is_locked=False,
+                booking_url=_SEARCH_URL, is_locked=False,
                 source="samoaairways_direct", source_tier="free",
             ))
 
@@ -374,7 +388,7 @@ class SamoaAirwaysConnectorClient:
                 price_formatted=f"{currency} {price:,.2f}",
                 outbound=route, inbound=None,
                 airlines=["Samoa Airways"], owner_airline="PH",
-                booking_url=f"{_SEARCH_URL}?from={req.origin}&to={req.destination}&dd={req.date_from}&ADT={req.adults or 1}", is_locked=False,
+                booking_url=_SEARCH_URL, is_locked=False,
                 source="samoaairways_direct", source_tier="free",
             ))
 
@@ -395,6 +409,26 @@ class SamoaAirwaysConnectorClient:
             except ValueError:
                 continue
         return None
+
+    @staticmethod
+    def _combine_rt(ob: list, ib: list, req) -> list:
+        combos = []
+        for o in sorted(ob, key=lambda x: x.price)[:15]:
+            for i in sorted(ib, key=lambda x: x.price)[:10]:
+                combos.append(FlightOffer(
+                    id=f"ph_rt_{o.id}_{i.id}",
+                    price=round(o.price + i.price, 2),
+                    currency=o.currency,
+                    outbound=o.outbound,
+                    inbound=i.outbound,
+                    owner_airline=o.owner_airline,
+                    airlines=list(set(o.airlines + i.airlines)),
+                    source=o.source,
+                    booking_url=o.booking_url,
+                    conditions=o.conditions,
+                ))
+        combos.sort(key=lambda x: x.price)
+        return combos[:20]
 
     @staticmethod
     def _empty(req: FlightSearchRequest) -> FlightSearchResponse:

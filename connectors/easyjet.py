@@ -243,10 +243,31 @@ class EasyjetConnectorClient:
         and search each one in parallel, merging results.  easyJet does NOT fly
         from LHR so city expansion is critical for London searches.
         """
+        ob_offers, ob_currency = await self._search_fanout(req)
+
+        if req.return_from and ob_offers:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_offers, _ = await self._search_fanout(ib_req)
+            if ib_offers:
+                ob_offers = self._combine_rt(ob_offers, ib_offers, req)
+
+        search_hash = hashlib.md5(
+            f"easyjet{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
+        ).hexdigest()[:12]
+
+        return FlightSearchResponse(
+            search_id=f"fs_{search_hash}",
+            origin=req.origin,
+            destination=req.destination,
+            currency=ob_currency,
+            offers=ob_offers,
+            total_results=len(ob_offers),
+        )
+
+    async def _search_fanout(self, req: FlightSearchRequest) -> tuple[list[FlightOffer], str]:
         origins = get_city_airports(req.origin)
         dests = get_city_airports(req.destination)
 
-        # Filter to only easyJet-served airports to avoid wasting time
         origins = [a for a in origins if a in self._EASYJET_AIRPORTS] or origins
         dests = [a for a in dests if a in self._EASYJET_AIRPORTS] or dests
 
@@ -256,9 +277,8 @@ class EasyjetConnectorClient:
 
         pairs = [(o, d) for o in origins for d in dests if o != d]
         if not pairs:
-            return self._empty(req)
+            return [], currency
 
-        # Run all airport pairs in parallel (max 3 concurrent browser pages)
         _sem = asyncio.Semaphore(3)
 
         async def _search_pair(orig: str, dest: str) -> FlightSearchResponse | None:
@@ -284,18 +304,7 @@ class EasyjetConnectorClient:
                     all_offers.append(o)
 
         all_offers.sort(key=lambda o: o.price)
-        search_hash = hashlib.md5(
-            f"easyjet{req.origin}{req.destination}{req.date_from}".encode()
-        ).hexdigest()[:12]
-
-        return FlightSearchResponse(
-            search_id=f"fs_{search_hash}",
-            origin=req.origin,
-            destination=req.destination,
-            currency=currency,
-            offers=all_offers,
-            total_results=len(all_offers),
-        )
+        return all_offers, currency
 
     async def _search_single(self, req: FlightSearchRequest) -> FlightSearchResponse:
         """
@@ -424,7 +433,7 @@ class EasyjetConnectorClient:
             )
 
             search_hash = hashlib.md5(
-                f"easyjet{req.origin}{req.destination}{req.date_from}".encode()
+                f"easyjet{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
             ).hexdigest()[:12]
 
             return FlightSearchResponse(
@@ -902,9 +911,29 @@ class EasyjetConnectorClient:
             except Exception:
                 return datetime(2000, 1, 1)
 
+    @staticmethod
+    def _combine_rt(ob: list, ib: list, req) -> list:
+        combos = []
+        for o in sorted(ob, key=lambda x: x.price)[:15]:
+            for i in sorted(ib, key=lambda x: x.price)[:10]:
+                combos.append(FlightOffer(
+                    id=f"u2_rt_{o.id}_{i.id}",
+                    price=round(o.price + i.price, 2),
+                    currency=o.currency,
+                    outbound=o.outbound,
+                    inbound=i.outbound,
+                    owner_airline=o.owner_airline,
+                    airlines=list(set(o.airlines + i.airlines)),
+                    source=o.source,
+                    booking_url=o.booking_url,
+                    conditions=o.conditions,
+                ))
+        combos.sort(key=lambda x: x.price)
+        return combos[:20]
+
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         search_hash = hashlib.md5(
-            f"easyjet{req.origin}{req.destination}{req.date_from}".encode()
+            f"easyjet{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{search_hash}",

@@ -30,13 +30,14 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import auto_block_if_proxied
 
 logger = logging.getLogger(__name__)
 
@@ -119,15 +120,33 @@ class AzulConnectorClient:
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
 
+        ob_result = None
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
-                result = await self._attempt_search(req, t0)
-                if result is not None:
-                    return result
+                ob_result = await self._attempt_search(req, t0)
+                if ob_result is not None:
+                    break
             except Exception as e:
                 logger.warning("Azul: attempt %d/%d error: %s", attempt, _MAX_ATTEMPTS, e)
 
-        return self._empty(req)
+        if ob_result is None:
+            return self._empty(req)
+
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = None
+            for attempt in range(1, _MAX_ATTEMPTS + 1):
+                try:
+                    ib_result = await self._attempt_search(ib_req, t0)
+                    if ib_result is not None:
+                        break
+                except Exception:
+                    pass
+            if ib_result and ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+
+        return ob_result
 
     async def _attempt_search(
         self, req: FlightSearchRequest, t0: float
@@ -152,6 +171,7 @@ class AzulConnectorClient:
 
         # Fresh page per search
         page = await ctx.new_page()
+        await auto_block_if_proxied(page)
 
         # Route interception: rewrite empty criteria with correct payload
         async def intercept_avail(route):
@@ -439,9 +459,29 @@ class AzulConnectorClient:
             f"&dt=ow&p1=ADT{req.adults}&px={req.adults}"
         )
 
+    @staticmethod
+    def _combine_rt(ob: list, ib: list, req) -> list:
+        combos = []
+        for o in sorted(ob, key=lambda x: x.price)[:15]:
+            for i in sorted(ib, key=lambda x: x.price)[:10]:
+                combos.append(FlightOffer(
+                    id=f"ad_rt_{o.id}_{i.id}",
+                    price=round(o.price + i.price, 2),
+                    currency=o.currency,
+                    outbound=o.outbound,
+                    inbound=i.outbound,
+                    owner_airline=o.owner_airline,
+                    airlines=list(set(o.airlines + i.airlines)),
+                    source=o.source,
+                    booking_url=o.booking_url,
+                    conditions=o.conditions,
+                ))
+        combos.sort(key=lambda x: x.price)
+        return combos[:20]
+
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         h = hashlib.md5(
-            f"azul{req.origin}{req.destination}{req.date_from}".encode()
+            f"azul{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
@@ -454,7 +494,7 @@ class AzulConnectorClient:
         offers.sort(key=lambda o: o.price)
         logger.info("Azul %s→%s returned %d offers in %.1fs", req.origin, req.destination, len(offers), elapsed)
         h = hashlib.md5(
-            f"azul{req.origin}{req.destination}{req.date_from}".encode()
+            f"azul{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,

@@ -224,12 +224,12 @@ class JetstarConnectorClient:
             f"&departuredate1={dep}&ADT={adults}"
         )
 
+        ob_offers = None
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
-                offers = await self._attempt_search(search_url, req)
-                if offers is not None:
-                    elapsed = time.monotonic() - t0
-                    return self._build_response(offers, req, elapsed)
+                ob_offers = await self._attempt_search(search_url, req)
+                if ob_offers is not None:
+                    break
                 logger.warning(
                     "Jetstar: attempt %d/%d got no results or blocked",
                     attempt, _MAX_ATTEMPTS,
@@ -240,7 +240,34 @@ class JetstarConnectorClient:
                     await _reset_browser()
                     await asyncio.sleep(2.0)
 
-        return self._empty(req)
+        if not ob_offers:
+            return self._empty(req)
+
+        # --- RT: second search for inbound ---
+        if req.return_from:
+            ret = req.return_from.strftime("%Y-%m-%d")
+            ib_url = (
+                f"https://booking.jetstar.com/au/en/booking/search-flights"
+                f"?origin1={req.destination}&destination1={req.origin}"
+                f"&departuredate1={ret}&ADT={adults}"
+            )
+            ib_req = req.model_copy(update={
+                "origin": req.destination,
+                "destination": req.origin,
+                "date_from": req.return_from,
+                "return_from": None,
+            })
+            for attempt in range(1, _MAX_ATTEMPTS + 1):
+                try:
+                    ib_offers = await self._attempt_search(ib_url, ib_req)
+                    if ib_offers is not None:
+                        ob_offers = self._combine_rt(ob_offers, ib_offers, req)
+                        break
+                except Exception:
+                    pass
+
+        elapsed = time.monotonic() - t0
+        return self._build_response(ob_offers, req, elapsed)
 
     async def _attempt_search(
         self, url: str, req: FlightSearchRequest
@@ -936,6 +963,47 @@ class JetstarConnectorClient:
             except (ValueError, IndexError):
                 continue
         return datetime(2000, 1, 1)
+
+    def _combine_rt(
+        self,
+        ob_offers: list[FlightOffer],
+        ib_offers: list[FlightOffer],
+        req: FlightSearchRequest,
+    ) -> list[FlightOffer]:
+        """Cross-multiply OB x IB one-way offers into RT combos."""
+        ob_sorted = sorted(ob_offers, key=lambda o: o.price)[:15]
+        ib_sorted = sorted(ib_offers, key=lambda o: o.price)[:10]
+        dep = req.date_from.strftime("%Y-%m-%d")
+        ret = req.return_from.strftime("%Y-%m-%d")
+        adults = getattr(req, "adults", 1) or 1
+        bk_url = (
+            f"https://booking.jetstar.com/au/en/booking/search-flights"
+            f"?origin1={req.origin}&destination1={req.destination}"
+            f"&departuredate1={dep}&origin2={req.destination}&destination2={req.origin}"
+            f"&departuredate2={ret}&ADT={adults}"
+        )
+        combined: list[FlightOffer] = []
+        for ob in ob_sorted:
+            for ib in ib_sorted:
+                total = round(ob.price + ib.price, 2)
+                key = f"{ob.id}_{ib.id}"
+                cid = f"jq_rt_{hashlib.md5(key.encode()).hexdigest()[:12]}"
+                combined.append(FlightOffer(
+                    id=cid,
+                    price=total,
+                    currency="AUD",
+                    price_formatted=f"${total:.2f} AUD",
+                    outbound=ob.outbound,
+                    inbound=ib.outbound,
+                    airlines=list(set(ob.airlines + ib.airlines)),
+                    owner_airline="JQ",
+                    booking_url=bk_url,
+                    is_locked=False,
+                    source="jetstar_direct",
+                    source_tier="free",
+                ))
+        combined.sort(key=lambda o: o.price)
+        return combined
 
     @staticmethod
     def _build_booking_url(req: FlightSearchRequest) -> str:
