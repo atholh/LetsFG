@@ -226,7 +226,12 @@ class SunCountryConnectorClient:
     ) -> list[FlightOffer]:
         fares = data.get("lowfares") or []
         target = req.date_from.strftime("%Y-%m-%d")
-        booking_url = "https://www.suncountry.com/booking/select"
+        booking_url = (
+            f"https://www.suncountry.com/booking/flights"
+            f"?depart={req.origin}&arrive={req.destination}"
+            f"&departDate={req.date_from.strftime('%Y-%m-%d')}"
+            f"&adt={req.adults or 1}&chd={req.children or 0}"
+        )
         offers: list[FlightOffer] = []
 
         for fare in fares:

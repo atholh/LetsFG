@@ -312,7 +312,7 @@ class ScootConnectorClient:
                     inbound=inbound,
                     airlines=["Scoot"],
                     owner_airline="TR",
-                    booking_url="https://booking.flyscoot.com",
+                    booking_url=self._build_booking_url(req),
                     is_locked=False,
                     source="scoot_direct",
                     source_tier="free",

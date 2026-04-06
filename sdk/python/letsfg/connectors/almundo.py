@@ -358,7 +358,12 @@ def _parse_almundo(data: dict, req: FlightSearchRequest) -> list[FlightOffer]:
                 owner_airline=airlines[0] if airlines else "Almundo",
                 source="almundo",
                 source_tier="ota",
-                booking_url="https://www.almundo.com.ar/",
+                booking_url=(
+                    f"https://www.almundo.com.ar/flights/results"
+                    f"/oneway/{req.origin}/{req.destination}"
+                    f"/{req.date_from.strftime('%Y-%m-%d')}"
+                    f"/{req.adults or 1}/{req.children or 0}/0"
+                ),
             ))
         except Exception as e:
             logger.debug("ALMUNDO: skipped item: %s", e)
