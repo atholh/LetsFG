@@ -1,12 +1,12 @@
 """
-Flair Airlines httpx scraper -- fetches fare data from flights.flyflair.com
-(EveryMundo airTRFX platform).
+Flair Airlines connector -- fetches fare data from flights.flyflair.com
+(EveryMundo airTRFX platform) via curl_cffi.
 
 Flair Airlines (IATA: F8) is a Canadian ultra-low-cost carrier based in
 Edmonton, Alberta. Operates domestic Canadian, transborder US, and
 Mexico/Caribbean routes. Default currency CAD.
 
-Strategy:
+Strategy (curl_cffi required — Cloudflare blocks httpx Python TLS fingerprint):
 1. Map IATA codes to city slugs used by flights.flyflair.com
 2. Fetch route page: flights.flyflair.com/en-ca/flights-from-{origin}-to-{dest}
 3. Extract __NEXT_DATA__ JSON from page
@@ -15,6 +15,7 @@ Strategy:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -23,20 +24,23 @@ import time
 from datetime import datetime
 from typing import Optional
 
-import httpx
+from curl_cffi import requests as creq
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import get_curl_cffi_proxies
 
 logger = logging.getLogger(__name__)
 
 # IATA code -> URL slug mapping for flights.flyflair.com route pages
 _IATA_TO_SLUG: dict[str, str] = {
+    # City codes (multi-airport cities)
+    "YTO": "toronto", "YMQ": "montreal",
     # Canada
     "YXX": "abbotsford",
     "YYC": "calgary",
@@ -91,6 +95,16 @@ class FlairConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
 
         origin_slug = _IATA_TO_SLUG.get(req.origin)
@@ -103,33 +117,72 @@ class FlairConnectorClient:
         logger.info("Flair: fetching %s", url)
 
         try:
-            async with httpx.AsyncClient(
-                timeout=self.timeout,
-                follow_redirects=True,
-                headers=_HEADERS,
-            ) as client:
-                resp = await client.get(url)
-
-            if resp.status_code != 200:
-                logger.warning("Flair: %s returned %d", url, resp.status_code)
+            html = await asyncio.get_event_loop().run_in_executor(
+                None, self._fetch_sync, url
+            )
+            if not html:
                 return self._empty(req)
 
-            fares = self._extract_fares(resp.text)
+            fares = self._extract_fares(html)
             if not fares:
                 logger.warning("Flair: no fares found in page")
                 return self._empty(req)
 
             offers = self._build_offers(fares, req)
+
+            # RT: fetch reverse route for inbound fares
+            if req.return_from and offers and dest_slug:
+                try:
+                    _rev_url = f"{_BASE}/flights-from-{dest_slug}-to-{origin_slug}"
+                    _rev_html = await asyncio.get_event_loop().run_in_executor(
+                        None, self._fetch_sync, _rev_url
+                    )
+                    if _rev_html:
+                        _ib_fares = self._extract_fares(_rev_html)
+                        if _ib_fares:
+                            _ib_best_price = float("inf")
+                            for _f in _ib_fares:
+                                _p = _f.get("totalPrice")
+                                if _p and 0 < float(_p) < _ib_best_price:
+                                    _ib_best_price = float(_p)
+                            if _ib_best_price < float("inf"):
+                                _ret = req.return_from
+                                _ret_dt = datetime.combine(_ret, datetime.min.time()) if not isinstance(_ret, datetime) else _ret
+                                _ib_seg = FlightSegment(
+                                    airline="F8", airline_name="Flair Airlines", flight_no="",
+                                    origin=req.destination, destination=req.origin,
+                                    departure=_ret_dt, arrival=_ret_dt,
+                                    duration_seconds=0, cabin_class="economy",
+                                )
+                                _ib_route = FlightRoute(segments=[_ib_seg], total_duration_seconds=0, stopovers=0)
+                                for _i, _o in enumerate(offers):
+                                    _total = round(_o.price + _ib_best_price, 2)
+                                    _rd = req.return_from.strftime("%Y-%m-%d") if hasattr(req.return_from, "strftime") else str(req.return_from)
+                                    _burl = _o.booking_url + f"&return={_rd}"
+                                    offers[_i] = FlightOffer(
+                                        id=f"rt_{_o.id}", price=_total, currency=_o.currency,
+                                        price_formatted=f"{_total:.2f} {_o.currency}",
+                                        outbound=_o.outbound, inbound=_ib_route,
+                                        airlines=_o.airlines, owner_airline=_o.owner_airline,
+                                        booking_url=_burl, is_locked=False,
+                                        source=_o.source, source_tier=_o.source_tier,
+                                    )
+                except Exception:
+                    pass
+
+            _td = req.date_from.date() if isinstance(req.date_from, datetime) else req.date_from
+            exact = [o for o in offers if o.outbound and o.outbound.segments and o.outbound.segments[0].departure.date() == _td]
+            offers = exact if exact else offers
             elapsed = time.monotonic() - t0
 
             offers.sort(key=lambda o: o.price)
             logger.info(
-                "Flair %s->%s returned %d offers in %.1fs (httpx)",
+                "Flair %s->%s returned %d offers in %.1fs",
                 req.origin, req.destination, len(offers), elapsed,
             )
 
             h = hashlib.md5(
-                f"flair{req.origin}{req.destination}{req.date_from}".encode()
+                f"flair{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
             ).hexdigest()[:12]
             return FlightSearchResponse(
                 search_id=f"fs_{h}",
@@ -141,8 +194,20 @@ class FlairConnectorClient:
             )
 
         except Exception as e:
-            logger.error("Flair httpx error: %s", e)
+            logger.error("Flair error: %s", e)
             return self._empty(req)
+
+    def _fetch_sync(self, url: str) -> str | None:
+        sess = creq.Session(impersonate="chrome131", proxies=get_curl_cffi_proxies())
+        try:
+            r = sess.get(url, headers=_HEADERS, timeout=int(self.timeout))
+            if r.status_code != 200:
+                logger.warning("Flair: %s returned %d", url, r.status_code)
+                return None
+            return r.text
+        except Exception as e:
+            logger.warning("Flair curl_cffi error: %s", e)
+            return None
 
     @staticmethod
     def _extract_fares(html: str) -> list[dict]:
@@ -258,7 +323,7 @@ class FlairConnectorClient:
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         h = hashlib.md5(
-            f"flair{req.origin}{req.destination}{req.date_from}".encode()
+            f"flair{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}",
@@ -268,3 +333,24 @@ class FlairConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_flai_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

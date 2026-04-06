@@ -14,7 +14,7 @@ Strategy:
 
 from __future__ import annotations
 
-from connectors.lhgroup_base import LHGroupBaseConnector
+from .lhgroup_base import LHGroupBaseConnector
 
 
 class DiscoverConnectorClient(LHGroupBaseConnector):

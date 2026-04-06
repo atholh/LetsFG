@@ -30,14 +30,14 @@ import time
 from datetime import timedelta
 from typing import Optional
 
-from connectors.browser import launch_headed_browser
+from .browser import launch_headed_browser, auto_block_if_proxied
 
 try:
     from connectors.browser import acquire_browser_slot, release_browser_slot
 except ImportError:
     async def acquire_browser_slot(): pass
     def release_browser_slot(): pass
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -76,9 +76,10 @@ _EXTRACT_JS = """
     if (iframe && iframe.contentDocument) docs.push(iframe.contentDocument);
 
     for (const doc of docs) {
-        // Find outbound trip (data-triptype="0")
-        const trip = doc.querySelector('#trip_0, [data-triptype="0"]');
-        if (!trip) continue;
+        // Extract flights from both trip_0 (outbound) and trip_1 (inbound)
+        for (const tripIdx of [0, 1]) {
+            const trip = doc.querySelector('#trip_' + tripIdx + ', [data-triptype="' + tripIdx + '"]');
+            if (!trip) continue;
 
         // Get origin/dest from the banner
         const banner = trip.querySelector('.selected-flight-banner-org-dst');
@@ -147,11 +148,13 @@ _EXTRACT_JS = """
 
             if (depTime && arrTime && price > 0) {
                 results.push({
+                    tripType: tripIdx,
                     depCode, arrCode, depTime, arrTime,
                     durationMin, stops, via, price,
                     currency: currSym, flightNo, seats
                 });
             }
+        }
         }
         if (results.length > 0) break;  // Found flights, stop searching docs
     }
@@ -170,6 +173,17 @@ class USBanglaConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         await acquire_browser_slot()
         try:
             return await self._search(req)
@@ -190,9 +204,10 @@ class USBanglaConnectorClient:
         )
         await context.add_init_script(_STEALTH_INIT)
         page = await context.new_page()
+        await auto_block_if_proxied(page)
 
         target_date = req.date_from.strftime("%Y-%m-%d")
-        return_date = (req.date_from + timedelta(days=1)).strftime("%Y-%m-%d")
+        return_date = req.return_from.strftime("%Y-%m-%d") if req.return_from else (req.date_from + timedelta(days=1)).strftime("%Y-%m-%d")
         adults = req.adults or 1
         children = req.children or 0
         infants = req.infants or 0
@@ -291,7 +306,17 @@ class USBanglaConnectorClient:
                 return self._empty(req)
 
             # Step 7: build offers
-            offers = self._build_offers(flights_data, req)
+            outbound_data = [fd for fd in flights_data if fd.get("tripType", 0) == 0]
+            inbound_data = [fd for fd in flights_data if fd.get("tripType", 0) == 1]
+            offers = self._build_offers(outbound_data or flights_data, req)
+
+            # Build RT combos if we have inbound flights
+            if req.return_from and inbound_data and offers:
+                inbound_offers = self._build_offers(inbound_data, req, is_return=True)
+                if inbound_offers:
+                    combos = self._build_rt_combos(offers, inbound_offers, req)
+                    if combos:
+                        offers = combos + offers
             elapsed = time.monotonic() - t0
             offers.sort(key=lambda o: o.price if o.price > 0 else float("inf"))
 
@@ -301,7 +326,7 @@ class USBanglaConnectorClient:
             )
 
             search_hash = hashlib.md5(
-                f"usbangla{req.origin}{req.destination}{req.date_from}".encode()
+                f"usbangla{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
             ).hexdigest()[:12]
 
             return FlightSearchResponse(
@@ -322,10 +347,10 @@ class USBanglaConnectorClient:
     # ── Offer building ──────────────────────────────────────────────────────
 
     def _build_offers(
-        self, flights_data: list[dict], req: FlightSearchRequest
+        self, flights_data: list[dict], req: FlightSearchRequest, is_return: bool = False,
     ) -> list[FlightOffer]:
         offers: list[FlightOffer] = []
-        target_date = req.date_from
+        target_date = req.return_from if is_return and req.return_from else req.date_from
 
         for i, fd in enumerate(flights_data):
             dep_time_str = fd.get("depTime", "")
@@ -418,14 +443,15 @@ class USBanglaConnectorClient:
                 stopovers=stops,
             )
 
-            offer_key = f"BS_{dep_time_str}_{arr_time_str}_{i}"
+            rt_tag = "_rt" if is_return else ""
+            offer_key = f"BS_{dep_time_str}_{arr_time_str}_{i}{rt_tag}"
             offer_hash = hashlib.md5(offer_key.encode()).hexdigest()[:10]
 
             booking_date = target_date.strftime("%d/%m/%Y")
             booking_url = (
                 f"https://usbair.com/book-a-flight"
                 f"?from_iata={dep_code}&to_iata={arr_code}"
-                f"&departureDate={booking_date}&adults={req.adults}&journeyType=oneway"
+                f"&departureDate={booking_date}&adults={req.adults}&journeyType={'return' if req.return_from else 'oneway'}"
             )
 
             offers.append(
@@ -434,7 +460,8 @@ class USBanglaConnectorClient:
                     price=price,
                     currency=iso_currency,
                     price_formatted=f"{curr_sym}{price:.2f}",
-                    outbound=route,
+                    outbound=None if is_return else route,
+                    inbound=route if is_return else None,
                     airlines=["BS"],
                     owner_airline="BS",
                     availability_seats=seats,
@@ -447,9 +474,49 @@ class USBanglaConnectorClient:
 
         return offers
 
+    def _build_rt_combos(
+        self,
+        outbound: list[FlightOffer],
+        inbound: list[FlightOffer],
+        req: FlightSearchRequest,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for ob in outbound[:15]:
+            for ib in inbound[:10]:
+                total = (ob.price or 0) + (ib.price or 0)
+                combo_hash = hashlib.md5(
+                    f"{ob.id}_{ib.id}".encode()
+                ).hexdigest()[:10]
+                dep_date = req.date_from.strftime("%d/%m/%Y")
+                ret_date = req.return_from.strftime("%d/%m/%Y") if req.return_from else ""
+                booking_url = (
+                    f"https://usbair.com/book-a-flight"
+                    f"?from_iata={req.origin}&to_iata={req.destination}"
+                    f"&departureDate={dep_date}&returnDate={ret_date}"
+                    f"&adults={req.adults}&journeyType=return"
+                )
+                combos.append(
+                    FlightOffer(
+                        id=f"usbangla_rt_{combo_hash}",
+                        price=total,
+                        currency=ob.currency,
+                        price_formatted=f"{total:.2f} {ob.currency}",
+                        outbound=ob.outbound,
+                        inbound=ib.inbound,
+                        airlines=["BS"],
+                        owner_airline="BS",
+                        source="usbangla_direct",
+                        source_tier="protocol",
+                        is_locked=True,
+                        booking_url=booking_url,
+                    )
+                )
+        combos.sort(key=lambda o: o.price or 0)
+        return combos[:50]
+
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         search_hash = hashlib.md5(
-            f"usbangla{req.origin}{req.destination}{req.date_from}".encode()
+            f"usbangla{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{search_hash}",
@@ -459,3 +526,24 @@ class USBanglaConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_usba_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

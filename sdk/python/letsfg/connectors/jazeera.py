@@ -124,6 +124,17 @@ class JazeeraConnectorClient:
 
     # ── Main entry point ─────────────────────────────────
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         token = await _ensure_token()
         if not token:
@@ -174,8 +185,7 @@ class JazeeraConnectorClient:
         if req.infants:
             passenger_types.append({"type": "INF", "count": req.infants})
 
-        return {
-            "criteria": [
+        criteria = [
                 {
                     "stations": {
                         "destinationStationCodes": [req.destination],
@@ -192,7 +202,26 @@ class JazeeraConnectorClient:
                         "exclusionType": "Default",
                     },
                 }
-            ],
+            ]
+        if req.return_from:
+            ret_date = req.return_from.strftime("%Y-%m-%d") if hasattr(req.return_from, "strftime") else str(req.return_from)
+            criteria.append({
+                "stations": {
+                    "destinationStationCodes": [req.origin],
+                    "originStationCodes": [req.destination],
+                    "searchDestinationMacs": True,
+                    "searchOriginMacs": True,
+                },
+                "dates": {"beginDate": ret_date},
+                "filters": {
+                    "maxConnections": 10,
+                    "compressionType": "CompressByProductClass",
+                    "exclusionType": "Default",
+                },
+            })
+
+        return {
+            "criteria": criteria,
             "passengers": {
                 "types": passenger_types,
                 "residentCountry": "",
@@ -253,26 +282,32 @@ class JazeeraConnectorClient:
                                 "productClass": pc,
                             }
 
-        # Extract journeys
+        # Extract journeys — results[0] = outbound, results[1] = inbound (if RT)
         results = av.get("results", [])
         if not results:
             logger.warning("Jazeera: no results in availability")
             return []
 
         target_key = f"{req.origin}|{req.destination}"
+        ib_target_key = f"{req.destination}|{req.origin}"
         journeys: list[dict] = []
+        ib_journeys: list[dict] = []
 
-        for result in results:
+        for idx, result in enumerate(results):
             for trip in result.get("trips", []):
                 for market in trip.get("journeysAvailableByMarket", []):
                     mk = market.get("key", "")
-                    if mk == target_key or not journeys:
-                        jlist = market.get("value", [])
+                    jlist = market.get("value", [])
+                    if idx == 0 and (mk == target_key or not journeys):
                         if mk == target_key:
                             journeys = jlist
-                            break
                         elif not journeys:
                             journeys = jlist
+                    elif idx >= 1 and (mk == ib_target_key or not ib_journeys):
+                        if mk == ib_target_key:
+                            ib_journeys = jlist
+                        elif not ib_journeys:
+                            ib_journeys = jlist
 
         if not journeys:
             logger.warning(
@@ -282,6 +317,51 @@ class JazeeraConnectorClient:
 
         booking_url = self._build_booking_url(req)
         offers: list[FlightOffer] = []
+
+        # Build cheapest IB route if RT
+        _ib_route: FlightRoute | None = None
+        _ib_price = 0.0
+        if req.return_from and ib_journeys:
+            best_ib_price = float("inf")
+            best_ib_journey = None
+            for j in ib_journeys:
+                for fare in j.get("fares", []):
+                    fak = fare.get("fareAvailabilityKey", "")
+                    info = fare_lookup.get(fak)
+                    if info and 0 < info["amount"] < best_ib_price:
+                        best_ib_price = info["amount"]
+                        best_ib_journey = j
+            if best_ib_journey and best_ib_price < float("inf"):
+                _ib_price = best_ib_price
+                ib_des = best_ib_journey.get("designator", {})
+                ib_segs_data = best_ib_journey.get("segments", [])
+                ib_flight_segs: list[FlightSegment] = []
+                for seg in ib_segs_data:
+                    seg_ident = seg.get("identifier", {})
+                    carrier = seg_ident.get("carrierCode", "J9") if seg_ident else "J9"
+                    fnum = seg_ident.get("identifier", "") if seg_ident else ""
+                    seg_des = seg.get("designator", {})
+                    ib_flight_segs.append(FlightSegment(
+                        airline="J9", airline_name="Jazeera Airways",
+                        flight_no=f"J9{fnum}" if fnum and not fnum.startswith("J9") else (fnum or "J9"),
+                        origin=seg_des.get("origin", req.destination) if seg_des else req.destination,
+                        destination=seg_des.get("destination", req.origin) if seg_des else req.origin,
+                        departure=self._parse_dt(seg_des.get("departure", "") if seg_des else ""),
+                        arrival=self._parse_dt(seg_des.get("arrival", "") if seg_des else ""),
+                        cabin_class="economy",
+                    ))
+                if not ib_flight_segs:
+                    ib_flight_segs.append(FlightSegment(
+                        airline="J9", airline_name="Jazeera Airways", flight_no="J9",
+                        origin=req.destination, destination=req.origin,
+                        departure=self._parse_dt(ib_des.get("departure", "")),
+                        arrival=self._parse_dt(ib_des.get("arrival", "")),
+                        cabin_class="economy",
+                    ))
+                ib_dur = 0
+                if ib_flight_segs[0].departure and ib_flight_segs[-1].arrival:
+                    ib_dur = int((ib_flight_segs[-1].arrival - ib_flight_segs[0].departure).total_seconds())
+                _ib_route = FlightRoute(segments=ib_flight_segs, total_duration_seconds=max(ib_dur, 0), stopovers=max(len(ib_flight_segs) - 1, 0))
 
         for journey in journeys:
             des = journey.get("designator", {})
@@ -387,13 +467,17 @@ class JazeeraConnectorClient:
             offer_key = "_".join(flight_numbers) + f"_{dep_str[:10]}"
             price = round(best_price, 2)
 
+            is_rt = _ib_route is not None
+            total_price = round(price + _ib_price, 2) if is_rt else price
+            prefix = "j9_rt_" if is_rt else "j9_"
+
             offers.append(FlightOffer(
-                id=f"j9_{hashlib.md5(offer_key.encode()).hexdigest()[:12]}",
-                price=price,
+                id=f"{prefix}{hashlib.md5(offer_key.encode()).hexdigest()[:12]}",
+                price=total_price,
                 currency=currency,
-                price_formatted=f"{price:.2f} {currency}",
+                price_formatted=f"{total_price:.2f} {currency}",
                 outbound=route,
-                inbound=None,
+                inbound=_ib_route,
                 airlines=["Jazeera Airways"],
                 owner_airline="J9",
                 booking_url=booking_url,
@@ -463,11 +547,15 @@ class JazeeraConnectorClient:
     @staticmethod
     def _build_booking_url(req: FlightSearchRequest) -> str:
         dep = req.date_from.strftime("%Y-%m-%d")
-        return (
+        url = (
             f"https://booking.jazeeraairways.com/en/search-flight"
             f"?origin={req.origin}&destination={req.destination}"
             f"&departureDate={dep}&adults={req.adults}"
         )
+        if req.return_from:
+            ret = req.return_from.strftime("%Y-%m-%d") if hasattr(req.return_from, "strftime") else str(req.return_from)
+            url += f"&returnDate={ret}"
+        return url
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         search_hash = hashlib.md5(
@@ -481,3 +569,24 @@ class JazeeraConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_jaze_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

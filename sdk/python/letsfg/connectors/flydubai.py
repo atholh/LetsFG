@@ -93,6 +93,17 @@ class FlydubaiConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         # ── Hybrid: try direct API first (no browser) ──
         try:
             result = await self._try_direct_api(req)
@@ -112,6 +123,26 @@ class FlydubaiConnectorClient:
         t0 = time.monotonic()
         date_str = req.date_from.strftime("%m/%d/%Y 12:00 AM")
 
+        search_criteria = [{
+                "date": date_str,
+                "dest": req.destination,
+                "direction": "outBound",
+                "origin": req.origin,
+                "isOriginMetro": True,
+                "isDestMetro": False,
+            }]
+        if req.return_from:
+            ret_dt = req.return_from
+            ret_str = ret_dt.strftime("%m/%d/%Y 12:00 AM") if hasattr(ret_dt, "strftime") else str(ret_dt)
+            search_criteria.append({
+                "date": ret_str,
+                "dest": req.origin,
+                "direction": "inBound",
+                "origin": req.destination,
+                "isOriginMetro": True,
+                "isDestMetro": False,
+            })
+
         payload = {
             "promoCode": "",
             "campaignCode": "",
@@ -123,14 +154,7 @@ class FlydubaiConnectorClient:
                 "childCount": req.children or 0,
                 "infantCount": req.infants or 0,
             },
-            "searchCriteria": [{
-                "date": date_str,
-                "dest": req.destination,
-                "direction": "outBound",
-                "origin": req.origin,
-                "isOriginMetro": True,
-                "isDestMetro": False,
-            }],
+            "searchCriteria": search_criteria,
             "variant": "1",
         }
 
@@ -156,8 +180,26 @@ class FlydubaiConnectorClient:
                 return None
 
             elapsed = time.monotonic() - t0
+
+            # Separate OB/IB segments by direction or origin
+            all_segs = data["segments"]
+            ob_segs = []
+            ib_segs = []
+            for seg in all_segs:
+                if not isinstance(seg, dict):
+                    continue
+                direction = seg.get("direction", "").lower()
+                seg_origin = seg.get("origin", "")
+                if direction == "inbound" or seg_origin == req.destination:
+                    ib_segs.append(seg)
+                else:
+                    ob_segs.append(seg)
+            if not ob_segs:
+                ob_segs = all_segs  # fallback: treat all as OB
+
             offers = self._parse_calendar_segments(
-                data["segments"], req, self._build_booking_url(req)
+                ob_segs, req, self._build_booking_url(req),
+                ib_segments=ib_segs if ib_segs else None,
             )
             if offers:
                 for o in offers:
@@ -603,7 +645,12 @@ class FlydubaiConnectorClient:
         if segments and isinstance(segments, list) and segments:
             first = segments[0] if isinstance(segments[0], dict) else {}
             if "lowestAdultFarePerPax" in first:
-                return self._parse_calendar_segments(segments, req, booking_url)
+                # Separate OB/IB segments
+                _ob = [s for s in segments if isinstance(s, dict) and s.get("origin", "") != req.destination]
+                _ib = [s for s in segments if isinstance(s, dict) and s.get("origin", "") == req.destination]
+                if not _ob:
+                    _ob = segments
+                return self._parse_calendar_segments(_ob, req, booking_url, ib_segments=_ib if _ib else None)
 
         flights_raw = (
             data.get("outboundFlights")
@@ -660,7 +707,8 @@ class FlydubaiConnectorClient:
         )
 
     def _parse_calendar_segments(
-        self, segments: list, req: FlightSearchRequest, booking_url: str
+        self, segments: list, req: FlightSearchRequest, booking_url: str,
+        ib_segments: list | None = None,
     ) -> list[FlightOffer]:
         """Parse FlyDubai /api/flights/7 calendar segments into offers.
 
@@ -670,6 +718,57 @@ class FlydubaiConnectorClient:
         """
         target_str = req.date_from.strftime("%Y-%m-%d")
         offers: list[FlightOffer] = []
+
+        # Build cheapest IB route if RT
+        _ib_route: FlightRoute | None = None
+        _ib_price = 0.0
+        if req.return_from and ib_segments:
+            ret_str = req.return_from.strftime("%Y-%m-%d") if hasattr(req.return_from, "strftime") else str(req.return_from)
+            best_ib_price = float("inf")
+            best_ib_seg = None
+            for seg in ib_segments:
+                if not isinstance(seg, dict):
+                    continue
+                p_str = seg.get("lowestAdultFarePerPax", "0")
+                try:
+                    p = float(p_str)
+                except (TypeError, ValueError):
+                    continue
+                if p <= 0 or seg.get("isSoldOut"):
+                    continue
+                ib_dep = (seg.get("departureDate") or "")[:10]
+                if ib_dep == ret_str and p < best_ib_price:
+                    best_ib_price = p
+                    best_ib_seg = seg
+            # If no exact date match, take cheapest overall
+            if not best_ib_seg:
+                for seg in ib_segments:
+                    if not isinstance(seg, dict):
+                        continue
+                    p_str = seg.get("lowestAdultFarePerPax", "0")
+                    try:
+                        p = float(p_str)
+                    except (TypeError, ValueError):
+                        continue
+                    if p <= 0 or seg.get("isSoldOut"):
+                        continue
+                    if p < best_ib_price:
+                        best_ib_price = p
+                        best_ib_seg = seg
+            if best_ib_seg and best_ib_price < float("inf"):
+                _ib_price = round(best_ib_price, 2)
+                ib_dep_date = (best_ib_seg.get("departureDate") or "")[:10]
+                _ib_route = FlightRoute(
+                    segments=[FlightSegment(
+                        airline="FZ", airline_name="flydubai", flight_no="",
+                        origin=best_ib_seg.get("origin") or req.destination,
+                        destination=best_ib_seg.get("dest") or req.origin,
+                        departure=self._parse_dt(ib_dep_date),
+                        arrival=datetime(2000, 1, 1),
+                        cabin_class="M",
+                    )],
+                    total_duration_seconds=0, stopovers=0,
+                )
 
         for seg in segments:
             if not isinstance(seg, dict):
@@ -690,11 +789,15 @@ class FlydubaiConnectorClient:
                 if "BUSINESS" in cab:
                     cabin = "C"
 
+            is_rt = _ib_route is not None
+            total_price = round(price + _ib_price, 2) if is_rt else round(price, 2)
+            prefix = "fz_rt_" if is_rt else "fz_"
+
             offer = FlightOffer(
-                id=f"fz_{hashlib.md5(f'{seg.get('route', '')}_{dep_date}'.encode()).hexdigest()[:12]}",
-                price=round(price, 2),
+                id=f"{prefix}{hashlib.md5(f'{seg.get('route', '')}_{dep_date}'.encode()).hexdigest()[:12]}",
+                price=total_price,
                 currency=currency,
-                price_formatted=f"{price:.2f} {currency}",
+                price_formatted=f"{total_price:.2f} {currency}",
                 outbound=FlightRoute(
                     segments=[
                         FlightSegment(
@@ -711,7 +814,7 @@ class FlydubaiConnectorClient:
                     total_duration_seconds=0,
                     stopovers=0,
                 ),
-                inbound=None,
+                inbound=_ib_route,
                 airlines=["flydubai"],
                 owner_airline="FZ",
                 booking_url=booking_url,
@@ -799,6 +902,12 @@ class FlydubaiConnectorClient:
     @staticmethod
     def _build_booking_url(req: FlightSearchRequest) -> str:
         dep = req.date_from.strftime("%Y-%m-%d")
+        if req.return_from:
+            ret = req.return_from.strftime("%Y-%m-%d") if hasattr(req.return_from, "strftime") else str(req.return_from)
+            return (
+                f"https://www.flydubai.com/en/flight-search?origin={req.origin}"
+                f"&destination={req.destination}&departure={dep}&return={ret}&pax={req.adults}&trip=roundtrip"
+            )
         return (
             f"https://www.flydubai.com/en/flight-search?origin={req.origin}"
             f"&destination={req.destination}&departure={dep}&pax={req.adults}&trip=oneway"
@@ -810,3 +919,24 @@ class FlydubaiConnectorClient:
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
             currency=req.currency, offers=[], total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_flyd_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

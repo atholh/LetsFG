@@ -9,8 +9,8 @@ from datetime import date, datetime, time as dt_time
 from typing import Optional
 from urllib.parse import urlencode
 
-from connectors.browser import _launched_pw_instances, acquire_browser_slot, release_browser_slot
-from models.flights import (
+from .browser import _launched_pw_instances, acquire_browser_slot, release_browser_slot, auto_block_if_proxied
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -121,6 +121,7 @@ async def _refresh_session():
     _context = context
 
     page = await context.new_page()
+    await auto_block_if_proxied(page)
     await page.add_init_script(
         "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
     )
@@ -172,12 +173,24 @@ class AerolineasConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         offers: list[FlightOffer] = []
         lock = await _get_lock()
 
         async with lock:
-            await acquire_browser_slot()
+            # NOTE: Do NOT acquire_browser_slot here — the engine already
+            # acquires the semaphore in _search_connector_generic before
+            # calling this method.  Double-acquiring wastes a slot.
             try:
                 page = await _ensure_session()
                 if page:
@@ -186,8 +199,6 @@ class AerolineasConnectorClient:
                         offers = self._build_offers(data, req)
             except Exception as exc:
                 logger.warning("Aerolíneas search failed for %s->%s: %s", req.origin, req.destination, exc)
-            finally:
-                release_browser_slot()
 
         offers.sort(key=lambda offer: offer.price if offer.price > 0 else float("inf"))
         logger.info(
@@ -325,3 +336,23 @@ class AerolineasConnectorClient:
             params.append(("leg", f"{origin}-{destination}-{outbound_day:%Y%m%d}"))
 
         return f"{_BASE_URL}?{urlencode(params, doseq=True)}"
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_aero_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

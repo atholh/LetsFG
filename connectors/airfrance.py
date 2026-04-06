@@ -15,13 +15,15 @@ from typing import Optional
 
 import httpx
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .airline_routes import get_city_airports, city_match_set
+from .browser import get_httpx_proxy_url
 
 logger = logging.getLogger(__name__)
 
@@ -79,14 +81,25 @@ class AirfranceConnectorClient:
                 timeout=self.timeout,
                 headers=_HEADERS,
                 follow_redirects=True,
-            )
+                proxy=get_httpx_proxy_url(),)
         return self._http
 
     async def close(self):
         if self._http and not self._http.is_closed:
             await self._http.aclose()
 
-    async def search_flights(self, req):
+    async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req):
         started = time.monotonic()
         offers = []
 
@@ -94,6 +107,13 @@ class AirfranceConnectorClient:
             payload = self._build_payload(req)
             cards = await self._fetch_cards(payload)
             offers = self._build_offers(cards, req)
+            if cards and not offers:
+                # Log sample origins/dests for debugging — API has data but nothing matched
+                sample = {(c["origin"], c["destination"]) for c in cards[:100]}
+                logger.info(
+                    "Air France %s->%s: %d cards from API, 0 matched. Sample routes: %s",
+                    req.origin, req.destination, len(cards), list(sample)[:10],
+                )
         except Exception as exc:
             logger.warning("Air France search failed for %s->%s: %s", req.origin, req.destination, exc)
 
@@ -118,14 +138,14 @@ class AirfranceConnectorClient:
     def _build_payload(self, req):
         outbound = _as_date(req.date_from)
         inbound = _as_date(req.return_from) if req.return_from else None
-        today = date.today()
-        start = min(today, outbound)
-        end = max(inbound or outbound, start + timedelta(days=90))
+        # Wide date window — sputnik is a fare discovery API, not exact-date search
+        start = outbound - timedelta(days=3)
+        end = inbound + timedelta(days=7) if inbound else outbound + timedelta(days=30)
 
         return {
             "markets": _MARKETS,
             "languageCode": "en",
-            "dataExpirationWindow": "2d",
+            "dataExpirationWindow": "7d",
             "datePattern": "dd MMM yy (E)",
             "outputCurrencies": ["EUR"],
             "departure": {"start": start.isoformat(), "end": end.isoformat()},
@@ -136,7 +156,7 @@ class AirfranceConnectorClient:
             "flexibleDates": True,
             "faresPerRoute": "10",
             "trfxRoutes": True,
-            "routesLimit": 200,
+            "routesLimit": 500,
             "sorting": [{"popularity": "DESC"}],
             "airlineCode": "af",
         }
@@ -177,23 +197,30 @@ class AirfranceConnectorClient:
 
     def _build_offers(self, cards, req):
         offers = []
+        # Expand city codes so "LON" matches LHR/LGW/STN etc. (includes input code itself)
+        origin_set = city_match_set(req.origin)
+        dest_set = city_match_set(req.destination)
 
-        for card in cards:
-            if card["origin"] != req.origin or card["destination"] != req.destination:
-                continue
-            if card["price"] <= 0:
-                continue
+        # First pass: strict origin + dest matching
+        matched_cards = [c for c in cards if c["origin"] in origin_set and c["destination"] in dest_set and c["price"] > 0]
+        if not matched_cards:
+            # Fallback: AF is hub-based (CDG/ORY). Match destination only so CDG→BCN
+            # is returned for a LON→BCN search — gives the user AF pricing for that dest.
+            matched_cards = [c for c in cards if c["destination"] in dest_set and c["price"] > 0]
 
-            outbound = _build_route(req.origin, req.destination, card["departure_date"])
+        for card in matched_cards:
+            # Use the actual origin from the card (e.g. CDG) not the requested origin
+            actual_origin = card["origin"]
+            outbound = _build_route(actual_origin, req.destination, card["departure_date"])
             inbound = None
             if card.get("return_date"):
-                inbound = _build_route(req.destination, req.origin, card["return_date"])
+                inbound = _build_route(req.destination, actual_origin, card["return_date"])
 
             price = round(card["price"], 2)
             currency = card.get("currency") or "EUR"
             return_token = f"_{card['return_date'].isoformat()}" if card.get("return_date") else ""
             offer_hash = hashlib.md5(
-                f"af_{req.origin}_{req.destination}_{card['departure_date'].isoformat()}{return_token}_{price}".encode()
+                f"af_{actual_origin}_{req.destination}_{card['departure_date'].isoformat()}{return_token}_{price}".encode()
             ).hexdigest()[:12]
 
             offers.append(FlightOffer(
@@ -213,7 +240,29 @@ class AirfranceConnectorClient:
                     "trip_type": card.get("trip_type", "round-trip"),
                     "cabin": str(card.get("cabin") or "Economy"),
                     "fare_note": "Promo fare from Air France embedded fare module",
+                    "actual_origin": actual_origin,
                 },
             ))
 
         return offers
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_airf_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

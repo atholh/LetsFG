@@ -118,6 +118,17 @@ class SouthAfricanAirwaysConnectorClient:
             await self._http.aclose()
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         client = await self._client()
 
@@ -144,7 +155,19 @@ class SouthAfricanAirwaysConnectorClient:
             logger.info("SAA: no fares on page %s", url)
             return self._empty(req)
 
-        offers = self._build_offers(fares, req)
+        # ── Round-trip: fetch reverse route page for IB fares ──
+        ib_fares: list[dict] = []
+        if req.return_from:
+            ib_url = f"{_BASE}/en/flights-from-{dest_slug}-to-{origin_slug}"
+            logger.info("SAA: fetching IB fares %s", ib_url)
+            try:
+                ib_resp = await client.get(ib_url)
+                if ib_resp.status_code == 200 and "__NEXT_DATA__" in ib_resp.text:
+                    ib_fares = self._extract_fares(ib_resp.text)
+            except Exception as e:
+                logger.warning("SAA IB fetch error: %s", e)
+
+        offers = self._build_offers(fares, req, ib_fares=ib_fares)
         offers.sort(key=lambda o: o.price if o.price > 0 else float("inf"))
 
         elapsed = time.monotonic() - t0
@@ -196,8 +219,9 @@ class SouthAfricanAirwaysConnectorClient:
                     all_fares.append(f)
         return all_fares
 
-    def _build_offers(self, fares: list[dict], req: FlightSearchRequest) -> list[FlightOffer]:
+    def _build_offers(self, fares: list[dict], req: FlightSearchRequest, *, ib_fares: list[dict] | None = None) -> list[FlightOffer]:
         target_date = req.date_from.strftime("%Y-%m-%d")
+        ret_date = req.return_from.strftime("%Y-%m-%d") if req.return_from else None
         offers: list[FlightOffer] = []
         valid_origins = city_match_set(req.origin)
         valid_dests = city_match_set(req.destination)
@@ -255,25 +279,65 @@ class SouthAfricanAirwaysConnectorClient:
             )
             route = FlightRoute(segments=[seg], total_duration_seconds=0, stopovers=0)
 
+            # ── IB route from reverse-page fares ──
+            _ib_route = None
+            _ib_price = 0.0
+            if ret_date and ib_fares:
+                # Prefer exact return-date match, fall back to cheapest IB
+                best_ib = None
+                best_ib_exact = None
+                for ibf in ib_fares:
+                    ibp = ibf.get("totalPrice")
+                    if not ibp or float(ibp) <= 0:
+                        continue
+                    ib_dep = (ibf.get("departureDate") or "")[:10]
+                    if ib_dep == ret_date:
+                        if best_ib_exact is None or float(ibp) < float(best_ib_exact.get("totalPrice", 9e9)):
+                            best_ib_exact = ibf
+                    if best_ib is None or float(ibp) < float(best_ib.get("totalPrice", 9e9)):
+                        best_ib = ibf
+                chosen_ib = best_ib_exact or best_ib
+                if chosen_ib:
+                    _ib_price = round(float(chosen_ib["totalPrice"]), 2)
+                    ib_dep_str = (chosen_ib.get("departureDate") or ret_date)[:10]
+                    try:
+                        ib_dt = datetime.strptime(ib_dep_str, "%Y-%m-%d")
+                    except ValueError:
+                        ib_dt = datetime(2000, 1, 1)
+                    ib_seg = FlightSegment(
+                        airline="SA", airline_name="South African Airways", flight_no="",
+                        origin=req.destination, destination=req.origin,
+                        departure=ib_dt, arrival=ib_dt,
+                        duration_seconds=0, cabin_class=cabin,
+                    )
+                    _ib_route = FlightRoute(segments=[ib_seg], total_duration_seconds=0, stopovers=0)
+
+            total_price = round(price_f + _ib_price, 2) if _ib_route else price_f
+            id_prefix = "sa_rt_" if _ib_route else "sa_"
+
             fid = hashlib.md5(
-                f"sa_{orig}{dest}{dep_date}{price_f}{cabin}".encode()
+                f"sa_{orig}{dest}{dep_date}{total_price}{cabin}{ret_date or ''}".encode()
             ).hexdigest()[:12]
 
+            bk_url = (
+                f"https://www.flysaa.com/book/flights"
+                f"?origin={req.origin}&destination={req.destination}"
+                f"&date={target_date}"
+                f"&adults={req.adults or 1}"
+            )
+            if _ib_route and ret_date:
+                bk_url += f"&returnDate={ret_date}"
+
             offers.append(FlightOffer(
-                id=f"sa_{fid}",
-                price=price_f,
+                id=f"{id_prefix}{fid}",
+                price=total_price,
                 currency=currency,
-                price_formatted=fare.get("formattedTotalPrice") or f"{price_f:.2f} {currency}",
+                price_formatted=f"{total_price:.2f} {currency}",
                 outbound=route,
-                inbound=None,
+                inbound=_ib_route,
                 airlines=["South African Airways"],
                 owner_airline="SA",
-                booking_url=(
-                    f"https://www.flysaa.com/book/flights"
-                    f"?origin={req.origin}&destination={req.destination}"
-                    f"&date={target_date}"
-                    f"&adults={req.adults or 1}"
-                ),
+                booking_url=bk_url,
                 is_locked=False,
                 source="saa_direct",
                 source_tier="free",
@@ -291,3 +355,24 @@ class SouthAfricanAirwaysConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_saa_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

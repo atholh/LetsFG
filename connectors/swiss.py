@@ -12,7 +12,7 @@ pages which cover all LH Group airline routes including Swiss.
 
 from __future__ import annotations
 
-from connectors.lhgroup_base import LHGroupBaseConnector
+from .lhgroup_base import LHGroupBaseConnector
 
 
 class SwissConnectorClient(LHGroupBaseConnector):

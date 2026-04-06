@@ -33,13 +33,14 @@ from typing import Optional
 
 import httpx
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import get_httpx_proxy_url
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +66,8 @@ class SASConnectorClient:
     async def _client(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
             self._http = httpx.AsyncClient(
-                timeout=self.timeout, headers=_HEADERS, follow_redirects=True
-            )
+                timeout=self.timeout, headers=_HEADERS, follow_redirects=True,
+                proxy=get_httpx_proxy_url(),)
         return self._http
 
     async def close(self):
@@ -74,6 +75,17 @@ class SASConnectorClient:
             await self._http.aclose()
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         client = await self._client()
         date_str = req.date_from.strftime("%Y-%m-%d")
@@ -88,11 +100,35 @@ class SASConnectorClient:
         }
 
         offers: list[FlightOffer] = []
+        ib_price_map: dict[str, float] = {}  # date→price for return direction
         try:
             resp = await client.get(_API, params=params)
             if resp.status_code == 200:
                 data = resp.json()
-                offers = self._parse(data, req)
+
+                # RT: fetch return direction calendar
+                if req.return_from:
+                    ret_date_str = req.return_from.strftime("%Y-%m-%d")
+                    ib_params = {
+                        "market": "en",
+                        "origin": req.destination,
+                        "destination": req.origin,
+                        "adult": str(req.adults or 1),
+                        "bookingFlow": "revenue",
+                        "departureDate": ret_date_str,
+                    }
+                    try:
+                        ib_resp = await client.get(_API, params=ib_params)
+                        if ib_resp.status_code == 200:
+                            ib_data = ib_resp.json()
+                            for d, info in ib_data.get("outbound", {}).items():
+                                p = info.get("totalPrice", 0)
+                                if p > 0:
+                                    ib_price_map[d] = float(p)
+                    except Exception as e2:
+                        logger.warning("SAS IB calendar error: %s", e2)
+
+                offers = self._parse(data, req, ib_price_map=ib_price_map)
         except Exception as e:
             logger.error("SAS API error: %s", e)
 
@@ -104,7 +140,7 @@ class SASConnectorClient:
         )
 
         sh = hashlib.md5(
-            f"sas{req.origin}{req.destination}{req.date_from}".encode()
+            f"sas{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{sh}",
@@ -115,11 +151,12 @@ class SASConnectorClient:
             total_results=len(offers),
         )
 
-    def _parse(self, data: dict, req: FlightSearchRequest) -> list[FlightOffer]:
+    def _parse(self, data: dict, req: FlightSearchRequest, *, ib_price_map: dict[str, float] | None = None) -> list[FlightOffer]:
         offers: list[FlightOffer] = []
         currency = data.get("currency", "EUR")
         outbound = data.get("outbound", {})
         target_date = req.date_from.strftime("%Y-%m-%d")
+        ret_date = req.return_from.strftime("%Y-%m-%d") if req.return_from else None
 
         for date_str, info in outbound.items():
             price = info.get("totalPrice", 0)
@@ -144,24 +181,48 @@ class SASConnectorClient:
                 segments=[seg], total_duration_seconds=0, stopovers=0
             )
 
-            key = f"sk_{req.origin}{req.destination}{date_str}{price}"
+            # RT: build inbound route if return price available
+            _ib_route = None
+            _ib_price = 0.0
+            if ret_date and ib_price_map:
+                # Prefer exact return date, fall back to cheapest
+                if ret_date in ib_price_map:
+                    _ib_price = ib_price_map[ret_date]
+                elif ib_price_map:
+                    _ib_price = min(ib_price_map.values())
+                if _ib_price > 0:
+                    ib_dt = datetime.strptime(ret_date, "%Y-%m-%d").replace(hour=8)
+                    ib_seg = FlightSegment(
+                        airline="SK", airline_name="SAS", flight_no="SK",
+                        origin=req.destination, destination=req.origin,
+                        departure=ib_dt, arrival=ib_dt,
+                    )
+                    _ib_route = FlightRoute(segments=[ib_seg], total_duration_seconds=0, stopovers=0)
+
+            total_price = round(float(price) + _ib_price, 2) if _ib_route else round(float(price), 2)
+            id_prefix = "sk_rt_" if _ib_route else "sk_"
+
+            key = f"sk_{req.origin}{req.destination}{date_str}{total_price}{ret_date or ''}"
             oid = hashlib.md5(key.encode()).hexdigest()[:12]
 
+            trip = "RT" if _ib_route else "OW"
             booking_url = (
                 f"https://www.flysas.com/en/book/flights?"
                 f"origin={req.origin}&destination={req.destination}"
                 f"&outboundDate={date_str.replace('-', '')}"
-                f"&adults={req.adults or 1}&trip=OW"
+                f"&adults={req.adults or 1}&trip={trip}"
             )
+            if _ib_route and ret_date:
+                booking_url += f"&inboundDate={ret_date.replace('-', '')}"
 
             offers.append(
                 FlightOffer(
-                    id=f"sk_{oid}",
-                    price=round(float(price), 2),
+                    id=f"{id_prefix}{oid}",
+                    price=total_price,
                     currency=currency,
-                    price_formatted=f"{price:.2f} {currency}",
+                    price_formatted=f"{total_price:.2f} {currency}",
                     outbound=route,
-                    inbound=None,
+                    inbound=_ib_route,
                     airlines=["SAS"],
                     owner_airline="SK",
                     conditions={"price_type": "lowest_fare"},
@@ -176,7 +237,7 @@ class SASConnectorClient:
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         sh = hashlib.md5(
-            f"sas{req.origin}{req.destination}{req.date_from}".encode()
+            f"sas{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{sh}",
@@ -186,3 +247,24 @@ class SASConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_sas_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

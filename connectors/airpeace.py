@@ -34,13 +34,14 @@ from typing import Optional
 
 import httpx
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import get_httpx_proxy_url
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +78,19 @@ class AirPeaceConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         dep_date = req.date_from.strftime("%d.%m.%Y")
+        is_rt = req.return_from is not None
         params = {
             "depPort": req.origin,
             "arrPort": req.destination,
@@ -86,30 +98,86 @@ class AirPeaceConnectorClient:
             "adult": str(req.adults),
             "child": str(req.children),
             "infant": str(req.infants),
-            "tripType": "ONE_WAY",
+            "tripType": "ROUND_TRIP" if is_rt else "ONE_WAY",
             "lang": "en",
         }
+        if is_rt:
+            params["returnDate"] = req.return_from.strftime("%d.%m.%Y")
+
         try:
             async with httpx.AsyncClient(
                 timeout=self.timeout,
                 follow_redirects=True,
                 headers=_HEADERS,
-            ) as client:
+                proxy=get_httpx_proxy_url(),) as client:
                 resp = await client.get(_AVAIL_URL, params=params)
                 resp.raise_for_status()
                 html = resp.text
+
+                # For RT, also fetch return leg
+                ret_html = None
+                if is_rt:
+                    ret_params = {
+                        "depPort": req.destination,
+                        "arrPort": req.origin,
+                        "departureDate": req.return_from.strftime("%d.%m.%Y"),
+                        "adult": str(req.adults),
+                        "child": str(req.children),
+                        "infant": str(req.infants),
+                        "tripType": "ONE_WAY",
+                        "lang": "en",
+                    }
+                    try:
+                        ret_resp = await client.get(_AVAIL_URL, params=ret_params)
+                        if ret_resp.status_code == 200:
+                            ret_html = ret_resp.text
+                    except Exception:
+                        pass
         except Exception as e:
             logger.warning("AirPeace: request failed: %s", e)
             return self._empty(req)
 
-        offers = self._parse_html(html, req)
+        outbound_offers = self._parse_html(html, req)
+
+        # Build RT combos
+        if is_rt and ret_html:
+            from copy import copy
+            ret_req = copy(req)
+            ret_req.origin = req.destination
+            ret_req.destination = req.origin
+            ret_req.date_from = req.return_from
+            inbound_offers = self._parse_html(ret_html, ret_req)
+            if inbound_offers:
+                booking_url = self._build_booking_url(req)
+                rt_offers = []
+                for ob in outbound_offers[:15]:
+                    for ib in inbound_offers[:10]:
+                        combined = round(ob.price + ib.price, 2)
+                        rt_id = hashlib.md5(f"p4_rt_{ob.id}_{ib.id}".encode()).hexdigest()[:12]
+                        rt_offers.append(FlightOffer(
+                            id=f"p4_{rt_id}",
+                            price=combined,
+                            currency=ob.currency,
+                            price_formatted=f"{combined:.0f} {ob.currency}",
+                            outbound=ob.outbound,
+                            inbound=ib.outbound,
+                            airlines=["Air Peace"],
+                            owner_airline="P4",
+                            booking_url=booking_url,
+                            is_locked=False,
+                            source="airpeace_direct",
+                            source_tier="free",
+                        ))
+                rt_offers.sort(key=lambda o: o.price)
+                outbound_offers = rt_offers[:50] if rt_offers else outbound_offers
+
         elapsed = time.monotonic() - t0
-        offers.sort(key=lambda o: o.price)
+        outbound_offers.sort(key=lambda o: o.price)
         logger.info(
             "AirPeace %s→%s: %d offers in %.1fs (httpx)",
-            req.origin, req.destination, len(offers), elapsed,
+            req.origin, req.destination, len(outbound_offers), elapsed,
         )
-        h = hashlib.md5(f"airpeace{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        h = hashlib.md5(f"airpeace{req.origin}{req.destination}{req.date_from}{req.return_from}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}",
             origin=req.origin,
@@ -281,16 +349,20 @@ class AirPeaceConnectorClient:
     @staticmethod
     def _build_booking_url(req: FlightSearchRequest) -> str:
         dep = req.date_from.strftime("%d.%m.%Y")
-        return (
+        trip = "ROUND_TRIP" if req.return_from else "ONE_WAY"
+        url = (
             f"https://book-airpeace.crane.aero/ibe/availability"
             f"?depPort={req.origin}&arrPort={req.destination}"
             f"&departureDate={dep}&adult={req.adults}"
             f"&child={req.children}&infant={req.infants}"
-            f"&tripType=ONE_WAY&lang=en"
+            f"&tripType={trip}&lang=en"
         )
+        if req.return_from:
+            url += f"&returnDate={req.return_from.strftime('%d.%m.%Y')}"
+        return url
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
-        h = hashlib.md5(f"airpeace{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        h = hashlib.md5(f"airpeace{req.origin}{req.destination}{req.date_from}{req.return_from}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}",
             origin=req.origin,
@@ -299,3 +371,24 @@ class AirPeaceConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_airp_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

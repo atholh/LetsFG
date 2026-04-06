@@ -122,6 +122,17 @@ class AirArabiaConnectorClient:
             await self._http.aclose()
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         """Search Air Arabia via FeaturedOffers API.
 
         Determines the origin country, calls the API for relevant month(s),
@@ -195,6 +206,60 @@ class AirArabiaConnectorClient:
             if o.id not in seen:
                 seen.add(o.id)
                 unique.append(o)
+
+        # RT: fetch reverse direction offers from destination country
+        if req.return_from and unique:
+            dest_country = _ORIGIN_COUNTRY.get(req.destination)
+            if not dest_country:
+                from .airline_routes import get_country
+                dest_country = get_country(req.destination)
+            if dest_country:
+                ret_months: list[str] = [str(req.return_from.month)]
+                ib_offers: list[FlightOffer] = []
+                for rm in ret_months:
+                    ib_payload = {
+                        "currency": currency,
+                        "includeTax": True,
+                        "countryCode": dest_country,
+                        "month": rm,
+                        "count": 30,
+                    }
+                    try:
+                        ib_resp = await client.post(_API_URL, json=ib_payload)
+                        if ib_resp.status_code == 200:
+                            ib_data = ib_resp.json()
+                            if ib_data.get("Success"):
+                                from copy import copy
+                                ib_req = copy(req)
+                                ib_req.origin = req.destination
+                                ib_req.destination = req.origin
+                                ib_offers.extend(self._parse_featured(ib_data, ib_req, currency))
+                    except Exception as ibe:
+                        logger.warning("AirArabia IB fetch error: %s", ibe)
+
+                if ib_offers:
+                    rt_combined: list[FlightOffer] = []
+                    for ob in unique[:15]:
+                        for ib in ib_offers[:10]:
+                            combined = round(ob.price + ib.price, 2)
+                            rt_id = hashlib.md5(f"g9_rt_{ob.id}_{ib.id}".encode()).hexdigest()[:12]
+                            rt_combined.append(FlightOffer(
+                                id=f"g9_rt_{rt_id}",
+                                price=combined,
+                                currency=ob.currency,
+                                price_formatted=f"{combined:.2f} {ob.currency}",
+                                outbound=ob.outbound,
+                                inbound=ib.outbound,
+                                airlines=["Air Arabia"],
+                                owner_airline="G9",
+                                booking_url=self._build_booking_url(req),
+                                is_locked=False,
+                                source="airarabia_direct",
+                                source_tier="free",
+                            ))
+                    if rt_combined:
+                        rt_combined.sort(key=lambda o: o.price)
+                        unique = rt_combined[:50]
 
         unique.sort(key=lambda o: o.price)
 
@@ -346,3 +411,24 @@ class AirArabiaConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_aira_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

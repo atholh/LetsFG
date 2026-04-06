@@ -4,7 +4,7 @@ Cathay Pacific open-search API scraper — direct curl_cffi, no auth needed.
 Cathay Pacific (IATA: CX) is a Hong Kong-based full-service airline.
 open-search API: book.cathaypacific.com — calendar pricing, no cookies/tokens.
 
-Strategy (Mar 2026):
+Strategy (Apr 2026):
 1. GET open-search endpoint with curl_cffi (impersonate Chrome)
 2. Returns cheapest one-way fares per destination from a given origin
 3. Filter for requested destination/date
@@ -17,8 +17,9 @@ API details:
 - Response: array of {date_departure, base_fare, total_fare, currency, tax,
     outbound_cabin, origin, destination, tax_inclusive}
 - Currency varies by origin: HKG→HKD, SIN→SGD, SYD→AUD, TPE→TWD, BKK→THB
-- Supported origins (CBEUCBEU site): HKG, SIN, SYD, TPE, BKK, and many Asia-Pacific
-- NRT, LHR unsupported with this SITE code (400 Bad Request)
+- 28 supported origins with CBEUCBEU site (mostly Asia-Pacific)
+- European/American origins (LHR, JFK, NRT, PVG) return 400
+- Unsupported origins are skipped early to avoid error logging
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from typing import Optional
 
 from curl_cffi import requests as creq
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -43,6 +44,15 @@ from models.flights import (
 logger = logging.getLogger(__name__)
 
 _API_URL = "https://book.cathaypacific.com/CathayPacificV3/dyn/air/api/instant/open-search"
+
+# Origins confirmed working with CBEUCBEU site code (Apr 2026).
+# European/American origins (LHR, JFK, NRT, PVG, etc.) return 400.
+_SUPPORTED_ORIGINS: set[str] = {
+    "HKG", "SIN", "SYD", "TPE", "BKK", "ICN", "MNL", "KUL",
+    "DEL", "BOM", "MEL", "PER", "BNE", "CAN", "PEK", "CGK",
+    "SGN", "HAN", "DPS", "FUK", "KIX", "NGO", "CEB", "CMB",
+    "DAC", "KTM", "HYD", "MAA",
+}
 
 # Airports that should be treated as equivalent for multi-airport cities
 _CITY_AIRPORTS: dict[str, set[str]] = {
@@ -77,6 +87,16 @@ class CathayConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         try:
             offers = await asyncio.get_event_loop().run_in_executor(
@@ -91,12 +111,17 @@ class CathayConnectorClient:
         return self._empty(req)
 
     def _api_search_sync(self, req: FlightSearchRequest) -> list[FlightOffer] | None:
+        # Skip unsupported origins early — they always return 400
+        if req.origin not in _SUPPORTED_ORIGINS:
+            logger.info("Cathay: origin %s not in supported set, skipping", req.origin)
+            return []
+
         params = {
             "ORIGIN": req.origin,
             "LANGUAGE": "GB",
             "CABIN": "Y",
             "SITE": "CBEUCBEU",
-            "TRIP_TYPE": "O",
+            "TRIP_TYPE": "R" if req.return_from else "O",
         }
 
         logger.info("Cathay: API %s→%s on %s", req.origin, req.destination,
@@ -152,12 +177,33 @@ class CathayConnectorClient:
     def _parse_offers(self, data: list[dict], req: FlightSearchRequest) -> list[FlightOffer]:
         target_dest = req.destination.upper()
         target_date = req.date_from.strftime("%Y%m%d")
+        is_rt = req.return_from is not None
 
         # Build set of matching destination codes (handle multi-airport cities)
         dest_codes = _CITY_AIRPORTS.get(target_dest, {target_dest})
 
         booking_url = self._build_booking_url(req)
         offers: list[FlightOffer] = []
+
+        # Build inbound route stub for RT (calendar API returns combined RT price)
+        inbound_route = None
+        if is_rt and req.return_from:
+            ret_dt = datetime.combine(req.return_from, datetime.min.time())
+            inbound_seg = FlightSegment(
+                airline="CX",
+                airline_name="Cathay Pacific",
+                flight_no="",
+                origin=req.destination,
+                destination=req.origin,
+                departure=ret_dt,
+                arrival=ret_dt,
+                cabin_class="M",
+            )
+            inbound_route = FlightRoute(
+                segments=[inbound_seg],
+                total_duration_seconds=0,
+                stopovers=0,
+            )
 
         for entry in data:
             dest = entry.get("destination", "")
@@ -195,8 +241,9 @@ class CathayConnectorClient:
                 stopovers=0,
             )
 
+            rt_tag = f"_{req.return_from}" if is_rt else ""
             offer_id = hashlib.md5(
-                f"cx_{req.origin}_{dest}_{dep_date}_{total_fare}".encode()
+                f"cx_{req.origin}_{dest}_{dep_date}_{total_fare}{rt_tag}".encode()
             ).hexdigest()[:12]
 
             offers.append(FlightOffer(
@@ -205,7 +252,7 @@ class CathayConnectorClient:
                 currency=currency,
                 price_formatted=f"{total_fare:.0f} {currency}",
                 outbound=route,
-                inbound=None,
+                inbound=inbound_route,
                 airlines=["Cathay Pacific"],
                 owner_airline="CX",
                 booking_url=booking_url,
@@ -225,7 +272,7 @@ class CathayConnectorClient:
             req.origin, req.destination, len(offers), elapsed,
         )
         h = hashlib.md5(
-            f"cathay{req.origin}{req.destination}{req.date_from}".encode()
+            f"cathay{req.origin}{req.destination}{req.date_from}{req.return_from}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}",
@@ -235,6 +282,27 @@ class CathayConnectorClient:
             offers=offers,
             total_results=len(offers),
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_cath_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]
 
     @staticmethod
     def _empty(req: FlightSearchRequest) -> FlightSearchResponse:
@@ -250,8 +318,12 @@ class CathayConnectorClient:
     @staticmethod
     def _build_booking_url(req: FlightSearchRequest) -> str:
         dep = req.date_from.strftime("%Y%m%d")
-        return (
+        url = (
             f"https://www.cathaypacific.com/cx/en_HK.html"
             f"?origin={req.origin}&destination={req.destination}"
             f"&date={dep}"
         )
+        if req.return_from:
+            ret = req.return_from.strftime("%Y%m%d")
+            url += f"&returnDate={ret}&tripType=R"
+        return url

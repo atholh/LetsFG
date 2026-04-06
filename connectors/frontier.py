@@ -32,14 +32,14 @@ try:
 except ImportError:
     AsyncSession = None
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from connectors.browser import stealth_args
+from .browser import stealth_args, auto_block_if_proxied
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +93,16 @@ class FrontierConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
 
         # --- PRIMARY: curl_cffi SSR extraction ---
@@ -126,6 +136,9 @@ class FrontierConnectorClient:
             f"?o1={req.origin}&d1={req.destination}&dd1={dep}"
             f"&ADT={adults}&mon=true&promo="
         )
+        if req.return_from:
+            ret = req.return_from.strftime("%m/%d/%Y")
+            url += f"&dr1={ret}"
 
         async with AsyncSession(impersonate="chrome") as s:
             resp = await s.get(url, timeout=15)
@@ -196,9 +209,11 @@ class FrontierConnectorClient:
             try:
                 from playwright_stealth import stealth_async
                 page = await context.new_page()
+                await auto_block_if_proxied(page)
                 await stealth_async(page)
             except ImportError:
                 page = await context.new_page()
+                await auto_block_if_proxied(page)
 
             logger.info("Frontier: loading %s", url[:100])
             await page.goto(
@@ -245,12 +260,48 @@ class FrontierConnectorClient:
         offers: list[FlightOffer] = []
 
         journeys = data.get("journeys") or []
-        for journey in journeys:
-            flights = journey.get("flights") or []
-            for flight in flights:
+
+        # Parse outbound flights from journeys[0]
+        outbound_offers: list[FlightOffer] = []
+        if journeys:
+            for flight in (journeys[0].get("flights") or []):
                 offer = self._parse_single_flight(flight, req, booking_url)
                 if offer:
-                    offers.append(offer)
+                    outbound_offers.append(offer)
+
+        # Parse inbound flights from journeys[1] if present (round-trip)
+        inbound_offers: list[FlightOffer] = []
+        if len(journeys) > 1:
+            for flight in (journeys[1].get("flights") or []):
+                offer = self._parse_single_flight(flight, req, booking_url)
+                if offer:
+                    inbound_offers.append(offer)
+
+        # Build RT combos if we have both directions
+        if outbound_offers and inbound_offers:
+            outbound_offers.sort(key=lambda o: o.price)
+            inbound_offers.sort(key=lambda o: o.price)
+            for ob in outbound_offers[:15]:
+                for ib in inbound_offers[:10]:
+                    rt_price = round(ob.price + ib.price, 2)
+                    rt_key = f"{ob.id}_{ib.id}"
+                    offers.append(FlightOffer(
+                        id=f"f9_{hashlib.md5(rt_key.encode()).hexdigest()[:12]}",
+                        price=rt_price,
+                        currency="USD",
+                        price_formatted=f"${rt_price:.2f}",
+                        outbound=ob.outbound,
+                        inbound=ib.outbound,
+                        airlines=["Frontier"],
+                        owner_airline="F9",
+                        booking_url=booking_url,
+                        is_locked=False,
+                        source="frontier_direct",
+                        source_tier="free",
+                    ))
+        else:
+            offers.extend(outbound_offers)
+
         return offers
 
     def _parse_single_flight(
@@ -384,11 +435,15 @@ class FrontierConnectorClient:
     def _build_booking_url(req: FlightSearchRequest) -> str:
         dep = req.date_from.strftime("%Y-%m-%d")
         adults = getattr(req, "adults", 1) or 1
-        return (
+        url = (
             f"https://booking.flyfrontier.com/Flight/InternalSelect"
             f"?o1={req.origin}&d1={req.destination}&dd1={dep}"
             f"&ADT={adults}&mon=true&promo="
         )
+        if req.return_from:
+            ret = req.return_from.strftime("%Y-%m-%d")
+            url += f"&dr1={ret}"
+        return url
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         h = hashlib.md5(
@@ -402,3 +457,24 @@ class FrontierConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_fron_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

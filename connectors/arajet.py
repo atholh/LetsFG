@@ -23,13 +23,14 @@ from typing import Optional
 
 import httpx
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import get_httpx_proxy_url
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +64,8 @@ class ArajetConnectorClient:
     async def _client(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
             self._http = httpx.AsyncClient(
-                timeout=self.timeout, headers=_HEADERS, follow_redirects=True
-            )
+                timeout=self.timeout, headers=_HEADERS, follow_redirects=True,
+                proxy=get_httpx_proxy_url(),)
         return self._http
 
     async def close(self):
@@ -72,6 +73,17 @@ class ArajetConnectorClient:
             await self._http.aclose()
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         client = await self._client()
         target = req.date_from.strftime("%Y-%m-%d")
@@ -89,11 +101,63 @@ class ArajetConnectorClient:
             return self._empty(req)
 
         offers = self._parse(data, req, target)
+
+        # RT: fetch reverse calendar for inbound
+        ib_offers: list[FlightOffer] = []
+        if req.return_from:
+            ret_target = req.return_from.strftime("%Y-%m-%d")
+            ret_month = req.return_from.strftime("%Y-%m")
+            try:
+                ib_resp = await client.get(
+                    f"{_BASE}/pss/calendar",
+                    params={"origin": req.destination, "destination": req.origin, "month": ret_month},
+                )
+                ib_resp.raise_for_status()
+                ib_data = ib_resp.json()
+                from copy import copy
+                ib_req = copy(req)
+                ib_req.origin = req.destination
+                ib_req.destination = req.origin
+                ib_req.date_from = req.return_from
+                ib_offers = self._parse(ib_data, ib_req, ret_target)
+            except Exception as e_ib:
+                logger.warning("Arajet IB calendar %s→%s: %s", req.destination, req.origin, e_ib)
+
+            if ib_offers:
+                rt_offers: list[FlightOffer] = []
+                for ob in offers[:15]:
+                    for ib in ib_offers[:10]:
+                        combined = round(ob.price + ib.price, 2)
+                        rt_id = hashlib.md5(f"dm_rt_{ob.id}_{ib.id}".encode()).hexdigest()[:12]
+                        rt_offers.append(FlightOffer(
+                            id=f"dm_rt_{rt_id}",
+                            price=combined,
+                            currency=ob.currency,
+                            price_formatted=f"{combined:.2f} {ob.currency}",
+                            outbound=ob.outbound,
+                            inbound=ib.outbound,
+                            airlines=["Arajet"],
+                            owner_airline="DM",
+                            conditions=ob.conditions,
+                            booking_url=(
+                                f"https://www.arajet.com/en-us/booking/select"
+                                f"?origin={req.origin}&destination={req.destination}"
+                                f"&date={target}&return={ret_target}"
+                                f"&adt={req.adults or 1}"
+                            ),
+                            is_locked=False,
+                            source="arajet_direct",
+                            source_tier="free",
+                        ))
+                if rt_offers:
+                    rt_offers.sort(key=lambda o: o.price)
+                    offers = rt_offers[:50]
+
         offers.sort(key=lambda o: o.price if o.price > 0 else float("inf"))
         elapsed = time.monotonic() - t0
         logger.info("Arajet %s→%s: %d offers in %.1fs", req.origin, req.destination, len(offers), elapsed)
 
-        sh = hashlib.md5(f"arajet{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        sh = hashlib.md5(f"arajet{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{sh}",
             origin=req.origin,
@@ -180,6 +244,27 @@ class ArajetConnectorClient:
             source="arajet_direct",
             source_tier="free",
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_arajet_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]
 
     @staticmethod
     def _empty(req: FlightSearchRequest) -> FlightSearchResponse:

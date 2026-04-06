@@ -86,7 +86,18 @@ class ElAlConnectorClient:
         if self._http and not self._http.is_closed:
             await self._http.aclose()
 
-    async def search_flights(self, req):
+    async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req):
         started = time.monotonic()
         offers = []
 
@@ -207,7 +218,7 @@ class ElAlConnectorClient:
                 inbound=inbound,
                 airlines=["El Al"],
                 owner_airline="LY",
-                booking_url=f"{_HOME_URL}/flights/booking?origin={req.origin}&destination={req.destination}&date={card['departure_date'].isoformat()}&adults={req.adults or 1}",
+                booking_url=_HOME_URL,
                 is_locked=False,
                 source="elal_direct",
                 source_tier="free",
@@ -219,3 +230,24 @@ class ElAlConnectorClient:
             ))
 
         return offers
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_elal_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

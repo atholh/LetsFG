@@ -41,13 +41,14 @@ try:
 except ImportError:
     HAS_CURL = False
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import auto_block_if_proxied, get_curl_cffi_proxies
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,17 @@ class SouthwestConnectorClient:
         pass  # Browser and cookie farm state are shared singletons
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         """
         Search Southwest flights via hybrid approach.
 
@@ -240,7 +252,7 @@ class SouthwestConnectorClient:
     @staticmethod
     def _bootstrap_session_sync() -> list[dict]:
         """Synchronous: visit southwest.com homepage to capture session cookies."""
-        sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+        sess = cffi_requests.Session(impersonate=_IMPERSONATE, proxies=get_curl_cffi_proxies())
         proxies = _get_curl_proxies()
         try:
             r = sess.get(
@@ -286,9 +298,11 @@ class SouthwestConnectorClient:
                 try:
                     from playwright_stealth import stealth_async
                     page = await context.new_page()
+                    await auto_block_if_proxied(page)
                     await stealth_async(page)
                 except ImportError:
                     page = await context.new_page()
+                    await auto_block_if_proxied(page)
 
                 logger.info("Southwest: farming cookies via Playwright homepage visit")
                 await page.goto(
@@ -353,7 +367,7 @@ class SouthwestConnectorClient:
         self, req: FlightSearchRequest, cookies: list[dict],
     ) -> Optional[dict]:
         """Synchronous curl_cffi search -- tries primary then mobile endpoint."""
-        sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+        sess = cffi_requests.Session(impersonate=_IMPERSONATE, proxies=get_curl_cffi_proxies())
 
         # Load cookies into session
         for c in cookies:
@@ -361,16 +375,18 @@ class SouthwestConnectorClient:
             sess.cookies.set(c["name"], c["value"], domain=domain)
 
         dep = req.date_from.strftime("%Y-%m-%d")
+        is_rt = bool(req.return_from)
+        ret = req.return_from.strftime("%Y-%m-%d") if is_rt else ""
         body = {
             "originationAirportCode": req.origin,
             "destinationAirportCode": req.destination,
             "departureDate": dep,
             "departureTimeOfDay": "ALL_DAY",
-            "returnDate": "",
+            "returnDate": ret,
             "returnTimeOfDay": "ALL_DAY",
             "adultPassengersCount": str(req.adults),
             "seniorPassengersCount": "0",
-            "tripType": "oneway",
+            "tripType": "roundtrip" if is_rt else "oneway",
             "fareType": "USD",
             "passengerType": "ADULT",
             "promoCode": "",
@@ -445,9 +461,11 @@ class SouthwestConnectorClient:
             try:
                 from playwright_stealth import stealth_async
                 page = await context.new_page()
+                await auto_block_if_proxied(page)
                 await stealth_async(page)
             except ImportError:
                 page = await context.new_page()
+                await auto_block_if_proxied(page)
 
             try:
                 cdp = await context.new_cdp_session(page)
@@ -811,13 +829,64 @@ class SouthwestConnectorClient:
         if not isinstance(air_products, list):
             air_products = []
 
+        # Parse inbound flights for round-trip searches
+        inbound_products = (
+            shopping.get("inboundPage", {}).get("cards")
+            or shopping.get("inboundFlights")
+            or data.get("inbound")
+            or []
+        )
+        if not isinstance(inbound_products, list):
+            inbound_products = []
+
+        # Parse outbound flights
+        outbound_offers: list[FlightOffer] = []
         # Southwest nests flights under airProducts[].details[]
         for product in air_products:
             details = product.get("details") or []
             for detail in details:
                 offer = self._parse_single_flight(detail, currency, req, booking_url)
                 if offer:
-                    offers.append(offer)
+                    outbound_offers.append(offer)
+
+        # Parse inbound flights and build RT combos
+        if inbound_products:
+            inbound_parsed: list[FlightOffer] = []
+            for product in inbound_products:
+                details = product.get("details") or []
+                for detail in details:
+                    offer = self._parse_single_flight(detail, currency, req, booking_url)
+                    if offer:
+                        inbound_parsed.append(offer)
+
+            if inbound_parsed and outbound_offers:
+                # Build RT combos: pair cheapest outbound with each inbound and vice versa
+                outbound_offers.sort(key=lambda o: o.price)
+                inbound_parsed.sort(key=lambda o: o.price)
+                for ob in outbound_offers[:15]:
+                    for ib in inbound_parsed[:10]:
+                        rt_price = round(ob.price + ib.price, 2)
+                        rt_key = f"{ob.id}_{ib.id}"
+                        offers.append(FlightOffer(
+                            id=f"wn_{hashlib.md5(rt_key.encode()).hexdigest()[:12]}",
+                            price=rt_price,
+                            currency=currency,
+                            price_formatted=f"${rt_price:.2f}",
+                            outbound=ob.outbound,
+                            inbound=ib.outbound,  # inbound's "outbound" is the return leg
+                            airlines=["Southwest"],
+                            owner_airline="WN",
+                            booking_url=booking_url,
+                            is_locked=False,
+                            source="southwest_direct",
+                            source_tier="free",
+                        ))
+            else:
+                # No inbound results — return outbound as one-way
+                offers.extend(outbound_offers)
+        else:
+            offers.extend(outbound_offers)
+
         return offers
 
     def _parse_single_flight(self, detail: dict, currency: str, req: FlightSearchRequest, booking_url: str) -> Optional[FlightOffer]:
@@ -956,12 +1025,19 @@ class SouthwestConnectorClient:
     @staticmethod
     def _build_booking_url(req: FlightSearchRequest) -> str:
         dep = req.date_from.strftime("%Y-%m-%d")
-        return (
+        is_rt = bool(req.return_from)
+        ret = req.return_from.strftime("%Y-%m-%d") if is_rt else ""
+        base = (
             f"https://www.southwest.com/air/booking/select.html"
             f"?originationAirportCode={req.origin}"
             f"&destinationAirportCode={req.destination}"
-            f"&departureDate={dep}&tripType=oneway&adultPassengersCount={req.adults}"
+            f"&departureDate={dep}"
+            f"&tripType={'roundtrip' if is_rt else 'oneway'}"
+            f"&adultPassengersCount={req.adults}"
         )
+        if is_rt:
+            base += f"&returnDate={ret}"
+        return base
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         h = hashlib.md5(f"southwest{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
@@ -969,3 +1045,24 @@ class SouthwestConnectorClient:
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
             currency="USD", offers=[], total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_sout_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

@@ -93,6 +93,17 @@ class KenyaAirwaysConnectorClient:
             await self._http.aclose()
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         started = time.monotonic()
         offers: list[FlightOffer] = []
 
@@ -147,8 +158,9 @@ class KenyaAirwaysConnectorClient:
         }
 
     async def _fetch_cards(self, payload: dict) -> list[dict]:
-        client = await self._client()
-        response = await client.post(_API_URL, json=payload)
+        from curl_cffi.requests import AsyncSession
+        async with AsyncSession(impersonate="chrome") as s:
+            response = await s.post(_API_URL, json=payload, headers=_HEADERS, timeout=self.timeout)
         response.raise_for_status()
 
         data = response.json()
@@ -213,9 +225,10 @@ class KenyaAirwaysConnectorClient:
                 airlines=["Kenya Airways"],
                 owner_airline="KQ",
                 booking_url=(
-                    f"https://www.kenya-airways.com/en/flights/"
-                    f"?from={req.origin}&to={req.destination}"
-                    f"&month={card['departure_date'].isoformat()}"
+                    f"https://www.kenya-airways.com/en_ke/book/"
+                    f"?origin={req.origin}&destination={req.destination}"
+                    f"&date={card['departure_date'].isoformat()}"
+                    f"&adults={req.adults or 1}&tripType={'R' if req.return_from else 'O'}"
                 ),
                 is_locked=False,
                 source="kenyaairways_direct",
@@ -228,3 +241,24 @@ class KenyaAirwaysConnectorClient:
             ))
 
         return offers
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_keny_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

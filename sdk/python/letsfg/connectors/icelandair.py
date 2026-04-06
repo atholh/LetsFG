@@ -90,6 +90,16 @@ class IcelandairConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
 
         origin_slug = _IATA_TO_SLUG.get(req.origin)
@@ -118,6 +128,47 @@ class IcelandairConnectorClient:
             return self._empty(req)
 
         offers = self._build_offers(fares, req)
+
+        # RT: fetch reverse route for inbound fares
+        if req.return_from and offers and dest_slug:
+            try:
+                _rev_url = f"{_BASE}/en-us/flights/flights-from-{dest_slug}-to-{origin_slug}"
+                _rev_html = await asyncio.get_event_loop().run_in_executor(
+                    None, self._fetch_sync, _rev_url
+                )
+                if _rev_html:
+                    _ib_fares = self._extract_fares(_rev_html)
+                    if _ib_fares:
+                        _ib_best_price = float("inf")
+                        for _f in _ib_fares:
+                            _p = _f.get("totalPrice")
+                            if _p and 0 < float(_p) < _ib_best_price:
+                                _ib_best_price = float(_p)
+                        if _ib_best_price < float("inf"):
+                            _ret = req.return_from
+                            _ret_dt = datetime.combine(_ret, datetime.min.time()) if not isinstance(_ret, datetime) else _ret
+                            _ib_seg = FlightSegment(
+                                airline="FI", airline_name="Icelandair", flight_no="",
+                                origin=req.destination, destination=req.origin,
+                                departure=_ret_dt, arrival=_ret_dt,
+                                duration_seconds=0, cabin_class="economy",
+                            )
+                            _ib_route = FlightRoute(segments=[_ib_seg], total_duration_seconds=0, stopovers=0)
+                            for _i, _o in enumerate(offers):
+                                _total = round(_o.price + _ib_best_price, 2)
+                                _rd = req.return_from.strftime("%Y-%m-%d") if hasattr(req.return_from, "strftime") else str(req.return_from)
+                                offers[_i] = FlightOffer(
+                                    id=f"rt_{_o.id}", price=_total, currency=_o.currency,
+                                    price_formatted=f"{_total:.2f} {_o.currency}",
+                                    outbound=_o.outbound, inbound=_ib_route,
+                                    airlines=_o.airlines, owner_airline=_o.owner_airline,
+                                    booking_url=_o.booking_url.replace("&type=oneway", f"&type=roundtrip&return={_rd}"),
+                                    is_locked=False,
+                                    source=_o.source, source_tier=_o.source_tier,
+                                )
+            except Exception:
+                pass
+
         offers.sort(key=lambda o: o.price if o.price > 0 else float("inf"))
 
         elapsed = time.monotonic() - t0
@@ -278,6 +329,27 @@ class IcelandairConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_icel_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]
 
     @staticmethod
     def _empty(req: FlightSearchRequest) -> FlightSearchResponse:

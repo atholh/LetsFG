@@ -30,14 +30,14 @@ try:
 except ImportError:
     HAS_CURL = False
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from connectors.browser import stealth_args
+from .browser import stealth_args, auto_block_if_proxied
 
 logger = logging.getLogger(__name__)
 
@@ -96,29 +96,51 @@ class FlybondiConnectorClient:
         children = getattr(req, "children", 0) or 0
         infants = getattr(req, "infants", 0) or 0
         currency = req.currency or "ARS"
-        return (
+        url = (
             f"https://flybondi.com/ar/search/results"
             f"?departureDate={dep}"
             f"&adults={adults}&children={children}&infants={infants}"
             f"&currency={currency}"
             f"&fromCityCode={req.origin}&toCityCode={req.destination}"
         )
+        if req.return_from:
+            url += f"&returnDate={req.return_from.strftime('%Y-%m-%d')}"
+        return url
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         search_url = self._build_search_url(req)
 
         # ── Primary: curl_cffi SSR extraction (fast, no browser) ──
         if HAS_CURL:
             try:
-                offers = await asyncio.to_thread(self._search_via_api, search_url, req)
-                if offers:
-                    elapsed = time.monotonic() - t0
-                    logger.info(
-                        "Flybondi API %s->%s: %d offers in %.1fs",
-                        req.origin, req.destination, len(offers), elapsed,
-                    )
-                    return self._build_response(offers, req, elapsed)
+                all_edges = await asyncio.to_thread(self._fetch_all_edges, search_url, req)
+                if all_edges:
+                    outbound_offers = self._parse_edges(all_edges, req)
+                    if req.return_from and outbound_offers:
+                        inbound_offers = self._parse_inbound_edges(all_edges, req)
+                        if inbound_offers:
+                            combos = self._build_rt_combos(outbound_offers, inbound_offers, req)
+                            if combos:
+                                outbound_offers = combos + outbound_offers
+                    if outbound_offers:
+                        elapsed = time.monotonic() - t0
+                        logger.info(
+                            "Flybondi API %s->%s: %d offers in %.1fs",
+                            req.origin, req.destination, len(outbound_offers), elapsed,
+                        )
+                        return self._build_response(outbound_offers, req, elapsed)
                 logger.warning("Flybondi API: no offers, falling back to Playwright")
             except Exception as e:
                 logger.warning("Flybondi API error: %s — falling back to Playwright", e)
@@ -139,14 +161,12 @@ class FlybondiConnectorClient:
 
         return self._empty(req)
 
-    def _search_via_api(self, url: str, req: FlightSearchRequest) -> list[FlightOffer] | None:
-        """Fetch SSR page via curl_cffi (TLS fingerprint) and extract Relay edges."""
+    def _fetch_all_edges(self, url: str, req: FlightSearchRequest) -> list[dict] | None:
+        """Fetch SSR page via curl_cffi and return ALL flight edges (outbound + inbound)."""
         r = curl_requests.get(url, impersonate="chrome131", timeout=int(self.timeout))
         if r.status_code != 200:
             logger.warning("Flybondi API: HTTP %d", r.status_code)
             return None
-
-        # Find the large inline <script> containing the Relay store
         scripts = re.findall(r'<script[^>]*>(.*?)</script>', r.text, re.DOTALL)
         for s in scripts:
             s = s.strip()
@@ -160,11 +180,9 @@ class FlybondiConnectorClient:
                     .get("edges", [])
                 )
                 if edges:
-                    return self._parse_edges(edges, req)
+                    return edges
             except (json.JSONDecodeError, TypeError):
                 continue
-
-        # Check for GraphQL error in SSR data
         for s in scripts:
             s = s.strip()
             if len(s) > 5000 and '"error"' in s:
@@ -176,8 +194,53 @@ class FlybondiConnectorClient:
                                        err.get("errorMessage", "")[:120])
                 except (json.JSONDecodeError, TypeError):
                     pass
-
         return None
+
+    def _parse_inbound_edges(self, edges: list[dict], req: FlightSearchRequest) -> list[FlightOffer]:
+        """Parse INBOUND direction flights from edges for RT combos."""
+        currency = req.currency or "ARS"
+        booking_url = self._build_booking_url(req)
+        offers: list[FlightOffer] = []
+        for edge in edges:
+            node = edge.get("node", {})
+            if not node:
+                continue
+            direction = node.get("direction", "OUTBOUND")
+            if direction != "INBOUND":
+                continue
+            offer = self._parse_flight_node(node, currency, req, booking_url)
+            if offer:
+                offers.append(offer)
+        return offers
+
+    def _build_rt_combos(
+        self,
+        outbound: list[FlightOffer],
+        inbound: list[FlightOffer],
+        req: FlightSearchRequest,
+    ) -> list[FlightOffer]:
+        """Combine outbound × inbound into RT offers."""
+        combos: list[FlightOffer] = []
+        for ob in outbound[:15]:
+            for ib in inbound[:10]:
+                price = round(ob.price + ib.price, 2)
+                combo_key = f"fo_rt_{ob.id}_{ib.id}"
+                combos.append(FlightOffer(
+                    id=f"fo_{hashlib.md5(combo_key.encode()).hexdigest()[:12]}",
+                    price=price,
+                    currency=ob.currency,
+                    price_formatted=f"{price:,.2f} {ob.currency}",
+                    outbound=ob.outbound,
+                    inbound=ib.outbound,
+                    airlines=list(set(ob.airlines + ib.airlines)),
+                    owner_airline="FO",
+                    booking_url=self._build_booking_url(req),
+                    is_locked=False,
+                    source="flybondi_direct",
+                    source_tier="free",
+                ))
+        combos.sort(key=lambda o: o.price)
+        return combos[:50]
 
     async def _attempt_search(
         self, url: str, req: FlightSearchRequest
@@ -194,9 +257,11 @@ class FlybondiConnectorClient:
             try:
                 from playwright_stealth import stealth_async
                 page = await context.new_page()
+                await auto_block_if_proxied(page)
                 await stealth_async(page)
             except ImportError:
                 page = await context.new_page()
+                await auto_block_if_proxied(page)
 
             # Set up GraphQL interception as fallback
             captured_flights: dict = {}
@@ -421,7 +486,7 @@ class FlybondiConnectorClient:
             req.origin, req.destination, len(offers), elapsed,
         )
         h = hashlib.md5(
-            f"flybondi{req.origin}{req.destination}{req.date_from}".encode()
+            f"flybondi{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}",
@@ -464,7 +529,7 @@ class FlybondiConnectorClient:
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         h = hashlib.md5(
-            f"flybondi{req.origin}{req.destination}{req.date_from}".encode()
+            f"flybondi{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}",
@@ -474,3 +539,24 @@ class FlybondiConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_flyb_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

@@ -22,12 +22,12 @@ import hashlib
 import json
 import logging
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from curl_cffi import requests as creq
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -84,6 +84,16 @@ class BritishAirwaysConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
 
         dep_city = _iata_to_city(req.origin)
@@ -113,18 +123,31 @@ class BritishAirwaysConnectorClient:
     async def _query_solr(
         self, dep_city: str, arr_city: str, req: FlightSearchRequest,
     ) -> list[FlightOffer]:
-        """Query BA SOLR for one-way pricing data."""
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        future_iso = f"{req.date_from.year + 1}-{req.date_from.month:02d}-01T00:00:00Z"
+        """Query BA SOLR for pricing data (one-way or round-trip)."""
+        # Narrow to ±7 days around the requested date so we get date-specific fares
+        # instead of cheapest-across-all-months calendar data.
+        target = req.date_from if isinstance(req.date_from, date) else req.date_from.date()
+        start_dt = target - timedelta(days=1)
+        end_dt = target + timedelta(days=7)
+        start_iso = f"{start_dt}T00:00:00Z"
+        end_iso = f"{end_dt}T23:59:59Z"
+
+        is_rt = bool(req.return_from)
+        trip_type = "RT" if is_rt else "OW"
 
         fq = (
             f"departure_city:{dep_city}+AND+"
             f"departure_country_code:*GB*+AND+"
             f"arrival_city:{arr_city}+AND+"
-            f"trip_type:OW+AND+"
+            f"trip_type:{trip_type}+AND+"
             f"cabin:M+AND+"
-            f"outbound_date:[{now_iso}+TO+{future_iso}]"
+            f"outbound_date:[{start_iso}+TO+{end_iso}]"
         )
+        if is_rt and req.return_from:
+            ret_target = req.return_from if isinstance(req.return_from, date) else req.return_from.date()
+            ret_start = f"{ret_target - timedelta(days=1)}T00:00:00Z"
+            ret_end = f"{ret_target + timedelta(days=7)}T23:59:59Z"
+            fq += f"+AND+inbound_date:[{ret_start}+TO+{ret_end}]"
 
         url = (
             f"{_BASE}{_SOLR_PATH}?fq={fq}"
@@ -147,7 +170,32 @@ class BritishAirwaysConnectorClient:
         if not data:
             return []
 
-        return self._parse_solr_docs(data, req)
+        offers = self._parse_solr_docs(data, req)
+
+        # If round-trip query returned no results, fall back to one-way
+        if not offers and is_rt:
+            logger.info("BA SOLR: no RT results, falling back to OW")
+            fq_ow = fq.replace(f"trip_type:{trip_type}", "trip_type:OW")
+            # Remove inbound_date filter for OW fallback
+            if "+AND+inbound_date:" in fq_ow:
+                fq_ow = fq_ow[:fq_ow.index("+AND+inbound_date:")]
+            url_ow = (
+                f"{_BASE}{_SOLR_PATH}?fq={fq_ow}"
+                f"&rows=50"
+                f"&locale=en_GB"
+                f"&sort=lowest_price%20asc"
+                f"&wt=json"
+            )
+            try:
+                data_ow = await asyncio.get_event_loop().run_in_executor(
+                    None, self._fetch_solr_sync, url_ow,
+                )
+                if data_ow:
+                    offers = self._parse_solr_docs(data_ow, req)
+            except Exception:
+                pass
+
+        return offers
 
     def _fetch_solr_sync(self, url: str) -> dict | None:
         sess = creq.Session(impersonate="chrome124")
@@ -228,9 +276,38 @@ class BritishAirwaysConnectorClient:
                 stopovers=0 if is_direct else 1,
             )
 
+            # Parse inbound date for RT offers
+            inbound = None
+            inbound_date_str = (doc.get("inbound_date") or "")[:10]
+            if inbound_date_str:
+                try:
+                    ret_dt = datetime.strptime(inbound_date_str, "%Y-%m-%d")
+                    ret_seg = FlightSegment(
+                        airline="BA",
+                        airline_name="British Airways",
+                        flight_no="",
+                        origin=arr_airport,
+                        destination=dep_airport,
+                        departure=ret_dt,
+                        arrival=ret_dt,
+                        duration_seconds=0,
+                        cabin_class="economy",
+                    )
+                    inbound = FlightRoute(
+                        segments=[ret_seg],
+                        total_duration_seconds=0,
+                        stopovers=0 if is_direct else 1,
+                    )
+                except ValueError:
+                    pass
+
             fid = hashlib.md5(
-                f"ba_{dep_airport}{arr_airport}{outbound_date_str}{price_f}".encode()
+                f"ba_{dep_airport}{arr_airport}{outbound_date_str}{inbound_date_str}{price_f}".encode()
             ).hexdigest()[:12]
+
+            rt_params = ""
+            if inbound:
+                rt_params = f"&retDate={inbound_date_str[:7].replace('-', '')}&oneWay=false"
 
             offers.append(FlightOffer(
                 id=f"ba_{fid}",
@@ -238,14 +315,15 @@ class BritishAirwaysConnectorClient:
                 currency=currency,
                 price_formatted=price_fmt,
                 outbound=route,
-                inbound=None,
+                inbound=inbound,
                 airlines=["British Airways"],
                 owner_airline="BA",
                 booking_url=(
                     f"https://www.britishairways.com/travel/fx/public/en_gb"
                     f"?from={dep_airport}&to={arr_airport}"
                     f"&depDate={outbound_date_str[:7].replace('-', '')}"
-                    f"&cabin=M&oneWay=true&ad={req.adults or 1}"
+                    f"&cabin=M&{'oneWay=false' if inbound else 'oneWay=true'}&ad={req.adults or 1}"
+                    + rt_params
                 ),
                 is_locked=False,
                 source="britishairways_direct",
@@ -253,6 +331,27 @@ class BritishAirwaysConnectorClient:
             ))
 
         return offers
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_brit_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]
 
     @staticmethod
     def _empty(req: FlightSearchRequest) -> FlightSearchResponse:

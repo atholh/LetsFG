@@ -31,13 +31,14 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import auto_block_if_proxied
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,16 @@ class BatikAirConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         context = await _ensure_browser()
         if context is None:
@@ -157,6 +168,7 @@ class BatikAirConnectorClient:
         page = None
         try:
             page = await context.new_page()
+            await auto_block_if_proxied(page)
 
             # --- API response interception (in case response is unencrypted) ---
             captured_data: dict = {}
@@ -210,10 +222,11 @@ class BatikAirConnectorClient:
             await self._remove_overlays(page)
             await asyncio.sleep(0.3)
 
-            # One-way
-            await self._set_one_way(page)
-            await asyncio.sleep(0.3)
-            await self._remove_overlays(page)
+            # Trip type: one-way or round-trip (BatikAir defaults to round-trip)
+            if not req.return_from:
+                await self._set_one_way(page)
+                await asyncio.sleep(0.3)
+                await self._remove_overlays(page)
 
             # Origin
             await self._remove_overlays(page)
@@ -237,6 +250,15 @@ class BatikAirConnectorClient:
                 logger.warning("BatikAir: date fill failed")
                 return self._empty(req)
             await asyncio.sleep(0.3)
+
+            # Return date (RT only — Ant Design RangePicker opens second calendar)
+            if req.return_from:
+                await asyncio.sleep(0.5)
+                ok = await self._fill_return_date(page, req)
+                if not ok:
+                    logger.debug("BatikAir: return date fill failed, continuing anyway")
+                await asyncio.sleep(0.3)
+
             await self._remove_overlays(page)
 
             # Search
@@ -516,6 +538,81 @@ class BatikAirConnectorClient:
             logger.warning("BatikAir: date error: %s", e)
             return False
 
+    async def _fill_return_date(self, page, req: FlightSearchRequest) -> bool:
+        """Fill return date in Ant Design RangePicker (second date selection).
+
+        When trip type is round-trip, Ant Design RangePicker keeps the calendar
+        open after selecting the departure date, waiting for the return date.
+        We navigate to the target month and click the return day.
+        """
+        if not req.return_from:
+            return False
+        target = req.return_from if hasattr(req.return_from, 'year') else datetime.strptime(str(req.return_from), "%Y-%m-%d")
+        try:
+            await asyncio.sleep(0.5)
+
+            # Check if calendar is still open (RangePicker keeps it open)
+            cal_open = await page.evaluate("""() => {
+                return !!document.querySelector('.ant-picker-dropdown:not(.ant-picker-dropdown-hidden)');
+            }""")
+            if not cal_open:
+                # Try to open the return date picker
+                clicked_cal = await page.evaluate("""() => {
+                    const pickers = document.querySelectorAll('.ant-picker');
+                    if (pickers.length >= 2) { pickers[1].click(); return true; }
+                    // Try range picker end input
+                    const inputs = document.querySelectorAll('.ant-picker-input input');
+                    if (inputs.length >= 2) { inputs[1].click(); return true; }
+                    return false;
+                }""")
+                if not clicked_cal:
+                    return False
+                await asyncio.sleep(1.0)
+
+            # Navigate to return month
+            target_month = target.strftime("%b")
+            target_year = str(target.year)
+            for _ in range(12):
+                header_text = await page.evaluate("""() => {
+                    const hv = document.querySelector('.ant-picker-header-view');
+                    return hv ? hv.innerText : '';
+                }""")
+                if target_month in header_text and target_year in header_text:
+                    break
+                next_clicked = await page.evaluate("""() => {
+                    const btn = document.querySelector(
+                        '.ant-picker-header-next-btn, button[aria-label*="Next month"]'
+                    );
+                    if (btn) { btn.click(); return true; }
+                    return false;
+                }""")
+                if not next_clicked:
+                    break
+                await asyncio.sleep(0.5)
+
+            # Click the return day
+            day = str(target.day)
+            clicked = await page.evaluate("""(day) => {
+                const cells = document.querySelectorAll('td.ant-picker-cell-in-view');
+                for (const cell of cells) {
+                    if (cell.classList.contains('ant-picker-cell-disabled')) continue;
+                    const inner = cell.querySelector('.ant-picker-cell-inner');
+                    if (inner && inner.textContent.trim() === day) {
+                        cell.click();
+                        return true;
+                    }
+                }
+                return false;
+            }""", day)
+
+            if clicked:
+                logger.debug("BatikAir: selected return date day %s", day)
+                return True
+            return False
+        except Exception as e:
+            logger.debug("BatikAir: return date error: %s", e)
+            return False
+
     # ── Search button ──
 
     async def _click_search(self, page) -> None:
@@ -708,6 +805,7 @@ class BatikAirConnectorClient:
 
         # Inspect common JSON shapes
         flights_raw = []
+        ib_flights_raw = []
         if isinstance(data, dict):
             for key in ("flights", "outboundFlights", "data", "journeys", "availability"):
                 v = data.get(key)
@@ -722,8 +820,54 @@ class BatikAirConnectorClient:
                             break
                     if flights_raw:
                         break
+            # RT: look for inbound/return flights
+            if req.return_from and isinstance(data, dict):
+                for ib_key in ("returnFlights", "inboundFlights", "inbound"):
+                    v = data.get(ib_key)
+                    if isinstance(v, list) and v:
+                        ib_flights_raw = v
+                        break
+                if not ib_flights_raw and isinstance(data.get("journeys"), dict):
+                    ib_flights_raw = data["journeys"].get("inbound") or data["journeys"].get("return") or []
         elif isinstance(data, list):
             flights_raw = data
+
+        # Build cheapest IB route if RT and IB data available
+        _ib_route: FlightRoute | None = None
+        _ib_price = 0.0
+        if req.return_from and ib_flights_raw:
+            best_ib_p = float("inf")
+            best_ib_seg = None
+            for ibf in ib_flights_raw:
+                if not isinstance(ibf, dict):
+                    continue
+                for pk in ("price", "totalPrice", "lowestFare", "farePrice", "amount"):
+                    pv = ibf.get(pk)
+                    if pv is not None:
+                        try:
+                            p = float(pv if not isinstance(pv, dict) else pv.get("amount", 0))
+                            if 0 < p < best_ib_p:
+                                best_ib_p = p
+                                ib_dep = self._parse_dt(ibf.get("departureDateTime", "") or ibf.get("departure", ""))
+                                ib_arr = self._parse_dt(ibf.get("arrivalDateTime", "") or ibf.get("arrival", ""))
+                                ib_dur = max(int((ib_arr - ib_dep).total_seconds()), 0) if ib_dep.year > 2000 and ib_arr.year > 2000 else 0
+                                ib_carrier = ibf.get("carrierCode", "") or ibf.get("carrier", "") or "ID"
+                                best_ib_seg = FlightSegment(
+                                    airline=ib_carrier, airline_name="Batik Air",
+                                    flight_no=str(ibf.get("flightNumber", "") or ibf.get("flightNo", "")),
+                                    origin=ibf.get("origin", req.destination),
+                                    destination=ibf.get("destination", req.origin),
+                                    departure=ib_dep, arrival=ib_arr,
+                                    duration_seconds=ib_dur, cabin_class="economy",
+                                )
+                            break
+                        except (TypeError, ValueError):
+                            pass
+            if best_ib_seg and best_ib_p < float("inf"):
+                _ib_price = round(best_ib_p, 2)
+                _ib_route = FlightRoute(segments=[best_ib_seg], total_duration_seconds=best_ib_seg.duration_seconds, stopovers=0)
+
+        is_rt = _ib_route is not None
 
         for flight in flights_raw:
             if not isinstance(flight, dict):
@@ -758,11 +902,13 @@ class BatikAirConnectorClient:
             )
 
             route = FlightRoute(segments=[seg], total_duration_seconds=dur, stopovers=0)
-            fid = hashlib.md5(f"id_{req.origin}{req.destination}{fno}{price}".encode()).hexdigest()[:12]
+            total_price = round(price + _ib_price, 2) if is_rt else round(price, 2)
+            prefix = "id_rt_" if is_rt else "id_"
+            fid = hashlib.md5(f"id_{req.origin}{req.destination}{fno}{total_price}".encode()).hexdigest()[:12]
 
             offers.append(FlightOffer(
-                id=f"id_{fid}", price=round(price, 2), currency="MYR",
-                price_formatted=f"RM {price:,.2f}", outbound=route, inbound=None,
+                id=f"{prefix}{fid}", price=total_price, currency="MYR",
+                price_formatted=f"RM {total_price:,.2f}", outbound=route, inbound=_ib_route,
                 airlines=["Batik Air"], owner_airline=carrier,
                 booking_url=booking_url, is_locked=False,
                 source="batikair_direct", source_tier="free",
@@ -800,7 +946,7 @@ class BatikAirConnectorClient:
     def _build_response(self, offers: list[FlightOffer], req: FlightSearchRequest, elapsed: float) -> FlightSearchResponse:
         offers.sort(key=lambda o: o.price)
         logger.info("BatikAir %s→%s returned %d offers in %.1fs", req.origin, req.destination, len(offers), elapsed)
-        h = hashlib.md5(f"batikair{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        h = hashlib.md5(f"batikair{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
             currency="MYR", offers=offers, total_results=len(offers),
@@ -812,8 +958,29 @@ class BatikAirConnectorClient:
         return f"https://www.batikair.com.my/book/flight-search"
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
-        h = hashlib.md5(f"batikair{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        h = hashlib.md5(f"batikair{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}", origin=req.origin, destination=req.destination,
             currency="MYR", offers=[], total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_id__{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

@@ -157,7 +157,7 @@ AIRPORT_COUNTRY: dict[str, str] = {
     "ASU": "PY", "MVD": "UY",
     "VVI": "BO", "LPB": "BO",
     # Africa
-    "JNB": "ZA", "CPT": "ZA", "DUR": "ZA", "PLZ": "ZA",
+    "JNB": "ZA", "HLA": "ZA", "CPT": "ZA", "DUR": "ZA", "PLZ": "ZA",
     "LOS": "NG", "ABV": "NG", "PHC": "NG",
     "NBO": "KE", "MBA": "KE",
     "ADD": "ET",
@@ -166,6 +166,116 @@ AIRPORT_COUNTRY: dict[str, str] = {
     "CMN": "MA", "RAK": "MA", "FEZ": "MA", "AGA": "MA", "TNG": "MA",
     "ALG": "DZ", "ORN": "DZ",
     "TUN": "TN", "NBE": "TN", "DJE": "TN",
+    # ── Additional Europe (LCY, SEN, Cyprus, Malta, Luxembourg, Slovakia, etc.) ──
+    "LCY": "GB", "SEN": "GB",  # London City, Southend
+    "LCA": "CY", "PFO": "CY", "ECN": "CY",  # Cyprus
+    "MLA": "MT",  # Malta
+    "LUX": "LU",  # Luxembourg
+    "BTS": "SK", "KSC": "SK",  # Slovakia
+    "GIB": "GI",  # Gibraltar
+    # ── Russia / CIS ──
+    "SVO": "RU", "DME": "RU", "VKO": "RU", "LED": "RU", "KJA": "RU",
+    "OVB": "RU", "VVO": "RU", "IKT": "RU", "KUF": "RU", "SVX": "RU",
+    "ROV": "RU", "KRR": "RU", "AER": "RU", "GOJ": "RU", "UFA": "RU",
+    "TBS": "GE", "BUS": "GE", "KUT": "GE",  # Georgia
+    "EVN": "AM", "GYD": "AZ",  # Armenia, Azerbaijan
+    "NQZ": "KZ", "ALA": "KZ", "TSE": "KZ", "CIT": "KZ",  # Kazakhstan
+    "TAS": "UZ", "SKD": "UZ", "BHK": "UZ",  # Uzbekistan
+    "FRU": "KG", "OSS": "KG",  # Kyrgyzstan
+    "DYU": "TJ", "LBD": "TJ",  # Tajikistan
+    "ASB": "TM",  # Turkmenistan
+    # ── Middle East (Iraq, Iran, Syria) ──
+    "BGW": "IQ", "BSR": "IQ", "EBL": "IQ", "NJF": "IQ", "ISU": "IQ",  # Iraq
+    "IKA": "IR", "THR": "IR", "MHD": "IR", "ISF": "IR", "SYZ": "IR", "TBZ": "IR",  # Iran
+    "DAM": "SY", "ALP": "SY",  # Syria
+    # ── Africa — East ──
+    "DAR": "TZ", "ZNZ": "TZ", "JRO": "TZ",  # Tanzania
+    "EBB": "UG",  # Uganda
+    "KGL": "KE",  # Actually Rwanda → fix below
+    "BJM": "BI",  # Burundi
+    "MGQ": "SO", "HGA": "SO",  # Somalia
+    "DJI": "DJ",  # Djibouti
+    "ASM": "ER",  # Eritrea
+    "MRU": "MU", "RRG": "MU",  # Mauritius
+    "SEZ": "SC",  # Seychelles
+    "TNR": "MG", "NOS": "MG",  # Madagascar
+    "HAH": "KM",  # Comoros
+    # ── Africa — West ──
+    "ABJ": "CI",  # Abidjan, Côte d'Ivoire
+    "BKO": "ML",  # Bamako, Mali
+    "OUA": "BF",  # Ouagadougou, Burkina Faso
+    "DLA": "CM", "NSI": "CM",  # Cameroon
+    "LBV": "GA",  # Libreville, Gabon
+    "FIH": "CD", "FBM": "CD",  # DR Congo
+    "BZV": "CG", "PNR": "CG",  # Congo-Brazzaville
+    "LFW": "TG",  # Lomé, Togo
+    "COO": "BJ",  # Cotonou, Benin
+    "NIM": "NE",  # Niamey, Niger
+    "NDJ": "TD",  # N'Djamena, Chad
+    "ROB": "LR", "MLW": "LR",  # Liberia
+    "FNA": "SL",  # Freetown, Sierra Leone
+    "CKY": "GN",  # Conakry, Guinea
+    "BJL": "GM",  # Banjul, Gambia
+    "OXB": "GW",  # Guinea-Bissau
+    "RAI": "CV",  # Cape Verde
+    "LUN": "ZM", "NLA": "ZM",  # Zambia
+    "HRE": "ZW", "BUQ": "ZW",  # Zimbabwe
+    "WDH": "NA",  # Namibia
+    "GBE": "BW",  # Botswana
+    "MPM": "MZ", "BEW": "MZ",  # Mozambique
+    "BLZ": "MW", "LLW": "MW",  # Malawi
+    "LAD": "AO", "VPE": "AO",  # Angola
+    "KRT": "SD", "PZU": "SD",  # Sudan
+    "JUB": "SS",  # South Sudan
+    # ── Africa — South ──
+    "MTS": "SZ",  # Eswatini
+    "MSU": "LS",  # Lesotho
+    # ── Pacific / Oceania ──
+    "NAN": "FJ", "SUV": "FJ",  # Fiji
+    "POM": "PG", "LAE": "PG",  # Papua New Guinea
+    "HIR": "SB",  # Honiara, Solomon Islands
+    "VLI": "VU",  # Port Vila, Vanuatu
+    "NOU": "NC", "GEA": "NC",  # New Caledonia
+    "PPT": "PF",  # Papeete, French Polynesia
+    "APW": "WS",  # Apia, Samoa
+    "TBU": "TO",  # Tonga
+    "GUM": "GU",  # Guam
+    "SPN": "MP",  # Saipan, N. Mariana Islands
+    "MAJ": "MH",  # Marshall Islands
+    "ROR": "PW",  # Palau
+    "TRW": "KI",  # Kiribati
+    "FUN": "TV",  # Funafuti, Tuvalu
+    "INU": "NR",  # Nauru
+    "YAP": "FM", "TKK": "FM", "PNI": "FM",  # Micronesia
+    "AIT": "CK", "RAR": "CK",  # Cook Islands
+    "WLS": "WF",  # Wallis and Futuna
+    "DIL": "TL",  # Timor-Leste
+    "BWN": "BN",  # Brunei
+    "PPG": "AS",  # Pago Pago, American Samoa
+    # ── Caribbean (additional) ──
+    "PAP": "HT", "CAP": "HT",  # Haiti
+    "GEO": "GY",  # Georgetown, Guyana
+    "PBM": "SR",  # Paramaribo, Suriname
+    "PTP": "GP",  # Guadeloupe
+    "FDF": "MQ",  # Martinique
+    "SLU": "LC", "UVF": "LC",  # St Lucia
+    "SVD": "VC",  # St Vincent
+    "GND": "GD",  # Grenada
+    "DOM": "DM",  # Dominica
+    "ANU": "AG", "SKB": "KN",  # Antigua, St Kitts
+    "EIS": "VG", "GCM": "KY", "PLS": "TC",  # BVI, Cayman, Turks & Caicos
+    "BDA": "BM",  # Bermuda
+    # ── Greenland ──
+    "SFJ": "GL", "GOH": "GL", "JAV": "GL",  # Greenland
+    # ── Additional Réunion ──
+    "RUN": "RE",  # Réunion
+    # ── Fix Rwanda ──
+    "KGL": "RW",  # Kigali is Rwanda, not Kenya
+    # ── Remaining gap countries ──
+    "KBL": "AF", "KDH": "AF", "MZR": "AF",  # Afghanistan
+    "PBH": "BT",  # Bhutan
+    "TIP": "LY", "BEN": "LY", "MJI": "LY",  # Libya
+    "ULN": "MN",  # Mongolia
 }
 
 # City codes that map to multiple airports in a country
@@ -174,7 +284,82 @@ CITY_COUNTRY: dict[str, str] = {
     "NYC": "US", "WAS": "US", "CHI": "US", "TYO": "JP", "OSA": "JP",
     "SEL": "KR", "BJS": "CN", "SHA": "CN", "BKK": "TH", "KUL": "MY",
     "REK": "IS", "MOW": "RU", "STO": "SE",
+    # Additional city codes
+    "IZM": "TR",  # Izmir
+    "SPK": "JP",  # Sapporo
+    "JKT": "ID",  # Jakarta
+    "RIO": "BR",  # Rio de Janeiro
+    "SAO": "BR",  # São Paulo
+    "YMQ": "CA",  # Montréal
+    "YTO": "CA",  # Toronto
+    "DXB": "AE",  # Dubai (city code used by some agents)
+    "THR": "IR",  # Tehran
+    "MEL": "AU",  # Melbourne (city code = airport)
 }
+
+# City code → constituent airport codes (for city expansion in fan-out)
+CITY_AIRPORTS: dict[str, list[str]] = {
+    "LON": ["LHR", "LGW", "STN", "LTN", "LCY", "SEN"],
+    "PAR": ["CDG", "ORY", "BVA"],
+    "ROM": ["FCO", "CIA"],
+    "MIL": ["MXP", "LIN", "BGY"],
+    "NYC": ["JFK", "EWR", "LGA"],
+    "WAS": ["IAD", "DCA", "BWI"],
+    "CHI": ["ORD", "MDW"],
+    "TYO": ["NRT", "HND"],
+    "OSA": ["KIX", "ITM"],
+    "SEL": ["ICN", "GMP"],
+    "BJS": ["PEK", "PKX"],
+    "SHA": ["PVG", "SHA"],
+    "BUE": ["EZE", "AEP"],
+    "RIO": ["GIG", "SDU"],
+    "BKK": ["BKK", "DMK"],
+    "KUL": ["KUL", "SZB"],
+    "REK": ["KEF", "RKV"],
+    "MOW": ["SVO", "DME", "VKO"],
+    "STO": ["ARN", "BMA", "NYO", "VST"],
+    "WAW": ["WAW", "WMI"],
+    "BER": ["BER", "SXF"],
+    "BRU": ["BRU", "CRL"],
+    "OSL": ["OSL", "TRF", "RYG"],
+    "CPH": ["CPH", "MMX"],
+    "GVA": ["GVA", "MLH"],
+    "DUS": ["DUS", "NRN", "CGN"],
+    "FRA": ["FRA", "HHN"],
+}
+
+
+def get_city_airports(iata: str) -> list[str]:
+    """Return all airport codes for a city code, or [iata] if it's an airport."""
+    return CITY_AIRPORTS.get(iata.upper().strip(), [iata.upper().strip()])
+
+
+def city_match_set(iata: str) -> frozenset[str]:
+    """Return all IATA codes that should match *iata*, expanding city codes.
+
+    For city codes like 'LON' returns frozenset({'LON','LHR','LGW','STN','LTN','LCY','SEN'}).
+    For airport codes like 'LHR' returns frozenset({'LHR'}).
+    Always includes the input code itself.
+    """
+    codes = set(get_city_airports(iata))
+    codes.add(iata.upper().strip())
+    return frozenset(codes)
+
+
+def resolve_slug(iata: str, slug_dict: dict[str, str]) -> str | None:
+    """Look up *iata* in *slug_dict* with city-code expansion fallback.
+
+    Tries the literal code first, then expands city codes (e.g. LON → LHR)
+    and returns the first matching slug.  Works for any EveryMundo connector.
+    """
+    slug = slug_dict.get(iata)
+    if slug:
+        return slug
+    for airport in get_city_airports(iata):
+        slug = slug_dict.get(airport)
+        if slug:
+            return slug
+    return None
 
 
 def get_country(iata: str) -> str | None:
@@ -264,6 +449,7 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
     "avelo": {"US"},
     "breeze": {"US"},
     "alaska": {"US", "MX", "CA", "CR", "BZ", "GT"},
+    "suncountry": {"US", "MX", "JM", "DO", "BZ", "CR"},
     "hawaiian": {"US", "JP", "KR", "AU", "NZ", "AS", "WS"},
     "american": {
         "US", "CA", "MX", "GB", "IE", "FR", "DE", "ES", "IT", "NL",
@@ -310,6 +496,10 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
         "MY", "TH", "ID", "PH", "SG", "VN", "KH", "MM", "LA", "IN",
         "LK", "BD", "NP", "CN", "JP", "KR", "TW", "HK", "AU", "NZ",
         "SA", "AE", "TR", "EG", "KE",
+    },
+    "airasiax": {
+        "MY", "AU", "JP", "KR", "IN", "ID", "CN", "TW", "NP", "SA",
+        "AE", "US", "NZ",
     },
     "vietjet": {"VN", "TH", "KR", "JP", "TW", "IN", "SG", "MY", "ID", "PH", "KH", "AU"},
     "cebupacific": {"PH", "SG", "MY", "TH", "VN", "KR", "JP", "TW", "CN", "HK", "AU", "AE"},
@@ -380,6 +570,10 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
     },
     "flysafair": {"ZA"},
     "airpeace": {"NG", "GH", "ZA", "KE", "AE", "GB"},
+    "pia": {
+        "PK", "AE", "SA", "QA", "KW", "OM", "BH", "GB", "TR", "CN",
+        "MY", "BD", "CA", "JP", "TH",
+    },
     "biman": {
         "BD", "AE", "SA", "QA", "KW", "OM", "IN", "NP", "TH", "MY",
         "SG", "HK", "CN", "IT", "GB", "CA", "PK",
@@ -713,6 +907,39 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
         "EG", "JO", "TZ", "KE", "ET",
         "CN",
     },
+    # ── Azerbaijan Airlines (EveryMundo sputnik — AZAL, BAK hub) ──
+    "azerbaijanairlines": {
+        "AZ", "GE", "TR", "RU",
+        "AE", "IL", "KZ", "UZ",
+        "IN", "PK",
+        "GB", "FR",
+        "ME",
+    },
+    # ── SriLankan Airlines (EveryMundo sputnik — CMB hub) ──
+    "srilankan": {
+        "LK",
+        "IN", "BD", "PK", "MV",
+        "AE", "BH", "KW", "SA", "QA", "OM",
+        "SG", "MY", "TH", "ID", "CN", "JP", "KR",
+        "GB", "FR", "DE", "IT",
+        "AU",
+        "US",
+    },
+    # ── flyadeal (EveryMundo sputnik — Saudi LCC, JED/RUH hubs) ──
+    "flyadeal": {
+        "SA",
+        "AE", "BH", "KW", "JO", "EG",
+        "TR",
+        "PK", "IN", "BD",
+    },
+    # ── Air Mauritius (EveryMundo sputnik — MRU hub) ──
+    "airmauritius": {
+        "MU",
+        "ZA", "KE", "MG", "RE",
+        "IN", "LK",
+        "SG", "MY", "AU",
+        "GB", "FR", "DE", "CH",
+    },
     # ── EVA Air (EveryMundo __NEXT_DATA__ — Star Alliance, TPE hub) ──
     "evaair": {
         "TW", "JP", "KR", "CN", "HK", "MO",
@@ -733,28 +960,16 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
         "SG", "HK", "JP",
         "TO", "WS", "VU", "SB", "KI", "TV", "NR",
     },
-    # ── Air Niugini (EveryMundo __NEXT_DATA__ — PNG flag carrier) ──
-    "airniugini": {
-        "PG", "AU", "SG", "HK", "PH", "JP", "ID", "SB", "FJ",
-    },
-    # ── Aircalin (EveryMundo __NEXT_DATA__ — New Caledonia flag carrier) ──
-    "aircalin": {
-        "NC", "AU", "NZ", "JP", "FJ", "VU", "WF", "PF",
-    },
-    # ── Solomon Airlines (EveryMundo __NEXT_DATA__ — Solomon Islands flag carrier) ──
-    "solomonairlines": {
-        "SB", "AU", "FJ", "VU", "PG",
-    },
-    # ── Air Vanuatu (EveryMundo __NEXT_DATA__ — Vanuatu flag carrier) ──
-    "airvanuatu": {
-        "VU", "AU", "NZ", "FJ", "NC", "SB",
-    },
-    # ── Air Tahiti Nui (EveryMundo __NEXT_DATA__ — French Polynesia flag carrier) ──
-    "airtahitinui": {
-        "PF", "US", "NZ", "JP", "FR", "CK",
-    },
     # ── Airnorth (.NET B2C — northern Australia + Dili) ──
     "airnorth": {"AU", "TL"},
+    # ── Air Niugini (EveryMundo __NEXT_DATA__ — PNG flag carrier) ──
+    "airniugini": {
+        "PG", "AU", "SG", "HK", "JP", "PH", "FJ", "SB", "MY",
+    },
+    # ── Link Airways (Playwright ASP.NET — Australian regional) ──
+    "linkairways": {"AU"},
+    # ── PNG Air (VARS PSS — PNG domestic) ──
+    "pngair": {"PG"},
     # ── I Want That Flight (AU aggregator — domestic + international from AU) ──
     "iwantthatflight": {
         "AU", "NZ", "FJ", "NC", "PF", "PG", "VU", "WS", "TO",
@@ -855,22 +1070,298 @@ AIRLINE_COUNTRIES: dict[str, set[str]] = {
         "US",
         "AR", "CL", "BR",
     },
-    "linkairways": {"AU"},
     "qatar": {
-        "QA", "AE", "SA", "KW", "BH", "OM", "JO", "LB", "IQ", "IR",
-        "GB", "FR", "DE", "IT", "ES", "NL", "BE", "CH", "AT", "SE",
-        "NO", "DK", "GR", "TR", "PL", "CZ", "IE", "PT", "HU", "RO",
-        "BG", "HR", "RS", "BA", "CY",
+        "QA",
+        "AE", "BH", "KW", "OM", "SA", "EG", "JO", "LB", "IQ",
+        "GB", "FR", "DE", "IT", "ES", "CH", "NL", "GR", "TR",
         "US", "CA",
-        "IN", "PK", "BD", "LK", "NP",
-        "TH", "SG", "MY", "ID", "PH", "VN", "KH", "MM",
-        "CN", "JP", "KR", "TW", "HK",
-        "AU", "NZ",
-        "EG", "MA", "TN", "DZ", "NG", "KE", "TZ", "ET", "ZA", "GH", "SN",
-        "BR", "AR",
-        "MV",
+        "IN", "PK", "BD", "LK", "TH", "MY", "SG", "ID", "PH",
+        "CN", "JP", "KR", "AU", "NZ",
+        "KE", "TZ", "ZA", "NG", "ET",
+        "BR", "MV", "SC", "KZ", "HK",
     },
-    "samoaairways": {"WS", "AS"},
+    "aircalin": {
+        "NC",
+        "AU", "NZ", "JP", "FJ", "VU", "WF", "PF",
+    },
+    "traveloka": {
+        "ID", "SG", "TH", "MY", "VN", "PH", "AU", "JP", "KR", "IN",
+        "HK", "TW", "CN", "MM", "KH", "LA", "BN",
+    },
+    "wego": {
+        "AE", "SA", "QA", "KW", "BH", "OM", "JO", "EG", "LB",
+        "IN", "PK", "BD", "LK", "ID", "SG", "TH", "MY", "VN", "PH",
+        "AU", "NZ", "JP", "KR", "HK", "TW", "CN",
+        "KE", "NG", "ZA", "TR", "GB", "DE", "FR",
+    },
+    "webjet": {
+        "AU", "NZ", "FJ", "NC", "VU", "PG", "WS", "TO",
+        "SG", "TH", "ID", "MY", "PH", "VN", "JP", "KR", "IN",
+        "US", "GB", "AE", "ZA", "HK", "CN", "TW",
+    },
+    "tiket": {
+        "ID", "SG", "TH", "MY", "VN", "PH", "AU",
+        "JP", "KR", "IN", "HK", "TW", "CN",
+    },
+    "tripcom": {
+        "US", "GB", "DE", "FR", "ES", "IT", "NL", "BE", "PT", "AT", "CH", "IE",
+        "SE", "NO", "DK", "FI", "PL", "CZ", "GR", "HU", "RO", "HR", "BG",
+        "CN", "HK", "TW", "JP", "KR", "SG", "TH", "MY", "VN", "PH", "ID",
+        "IN", "LK", "BD", "PK", "NP", "MM", "KH", "LA", "BN",
+        "AU", "NZ", "AE", "SA", "QA", "KW", "BH", "OM",
+        "EG", "TR", "IL", "JO", "LB",
+        "ZA", "KE", "NG", "ET", "MA", "TN",
+        "US", "CA", "MX", "BR", "AR", "CL", "CO", "PE",
+        "RU",
+    },
+    "cleartrip": {
+        "IN", "AE", "SA", "QA", "KW", "BH", "OM",
+        "SG", "TH", "MY", "ID", "LK", "BD", "NP", "PK",
+        "GB", "US", "AU", "JP", "KR", "HK", "CN",
+        "KE", "ET", "EG", "ZA",
+    },
+    "edreams": {
+        "GB", "IE", "DE", "FR", "ES", "IT", "PT", "NL", "BE", "AT", "CH",
+        "SE", "NO", "DK", "FI", "PL", "CZ", "GR", "HU", "RO", "HR", "BG",
+        "US", "CA", "MX", "BR", "AR", "CL", "CO", "PE",
+        "IN", "JP", "KR", "CN", "HK", "TW", "SG", "TH", "MY", "PH", "ID",
+        "AU", "NZ", "AE", "SA", "QA", "EG", "TR", "IL", "ZA", "KE",
+    },
+    "opodo": {
+        "GB", "IE", "DE", "FR", "ES", "IT", "PT", "NL", "BE", "AT", "CH",
+        "SE", "NO", "DK", "FI", "PL", "CZ", "GR", "HU", "RO", "HR", "BG",
+        "US", "CA", "MX", "BR", "AR", "CL", "CO", "PE",
+        "IN", "JP", "KR", "CN", "HK", "TW", "SG", "TH", "MY", "PH", "ID",
+        "AU", "NZ", "AE", "SA", "QA", "EG", "TR", "IL", "ZA", "KE",
+    },
+    "momondo": {
+        "GB", "IE", "DE", "FR", "ES", "IT", "PT", "NL", "BE", "AT", "CH",
+        "SE", "NO", "DK", "FI", "PL", "CZ", "GR", "HU", "RO", "HR", "BG",
+        "US", "CA", "MX", "BR", "AR", "CL", "CO", "PE",
+        "IN", "JP", "KR", "CN", "HK", "TW", "SG", "TH", "MY", "PH", "ID",
+        "AU", "NZ", "AE", "SA", "QA", "EG", "TR", "IL", "ZA", "KE",
+    },
+    "kayak": {
+        "GB", "IE", "DE", "FR", "ES", "IT", "PT", "NL", "BE", "AT", "CH",
+        "SE", "NO", "DK", "FI", "PL", "CZ", "GR", "HU", "RO", "HR", "BG",
+        "US", "CA", "MX", "BR", "AR", "CL", "CO", "PE",
+        "IN", "JP", "KR", "CN", "HK", "TW", "SG", "TH", "MY", "PH", "ID",
+        "AU", "NZ", "AE", "SA", "QA", "EG", "TR", "IL", "ZA", "KE",
+    },
+    "cheapflights": {
+        "GB", "IE", "DE", "FR", "ES", "IT", "PT", "NL", "BE", "AT", "CH",
+        "SE", "NO", "DK", "FI", "PL", "CZ", "GR", "HU", "RO", "HR", "BG",
+        "US", "CA", "MX", "BR", "AR", "CL", "CO", "PE",
+        "IN", "JP", "KR", "CN", "HK", "TW", "SG", "TH", "MY", "PH", "ID",
+        "AU", "NZ", "AE", "SA", "QA", "EG", "TR", "IL", "ZA", "KE",
+    },
+    "skyscanner": {
+        "GB", "IE", "DE", "FR", "ES", "IT", "PT", "NL", "BE", "AT", "CH",
+        "SE", "NO", "DK", "FI", "PL", "CZ", "GR", "HU", "RO", "HR", "BG",
+        "US", "CA", "MX", "BR", "AR", "CL", "CO", "PE",
+        "IN", "JP", "KR", "CN", "HK", "TW", "SG", "TH", "MY", "PH", "ID",
+        "AU", "NZ", "AE", "SA", "QA", "EG", "TR", "IL", "ZA", "KE",
+    },
+    "avianca": {
+        "CO", "EC", "PE", "CL", "BR", "MX", "US", "CR", "GT", "SV", "HN",
+        "PA", "NI", "CU", "DO", "JM", "TT", "CW", "AW", "ES",
+    },
+    "copa": {
+        "PA", "CO", "EC", "PE", "CL", "BR", "MX", "US", "CR", "GT", "SV",
+        "HN", "NI", "CU", "DO", "JM", "TT", "CW", "AW", "VE", "AR", "UY",
+        "PY", "BO", "GY", "BZ", "HT", "BS",
+    },
+    "latam": {
+        "CL", "BR", "PE", "CO", "EC", "AR", "UY", "PY", "BO", "MX",
+        "US", "ES", "FR", "DE", "IT", "GB", "PT", "NL",
+        "AU", "NZ", "IL",
+    },
+    "lot": {
+        "PL", "DE", "GB", "FR", "IT", "ES", "NL", "BE", "AT", "CH",
+        "CZ", "HU", "HR", "RO", "BG", "UA", "LT", "LV", "EE",
+        "NO", "SE", "DK", "FI", "IE",
+        "US", "CA", "KR", "JP", "CN", "IN", "LK",
+        "IL", "TR", "EG", "JO", "AE", "SA",
+    },
+    "westjet": {
+        "CA", "US", "MX", "GB", "IE", "FR", "ES", "IT", "DE", "NL",
+        "JM", "DO", "CU", "BB", "BS", "LC", "AG", "GD", "TC", "BZ",
+        "CR", "JP",
+    },
+    "airtahitinui": {
+        "PF", "US", "NZ", "JP", "FR",
+    },
+    "airvanuatu": {
+        "VU", "AU", "NZ", "FJ", "NC",
+    },
+    "citilink": {
+        "ID", "MY", "SG", "TH", "AU",
+    },
+    "samoaairways": {
+        "WS", "AS",
+    },
+    "solomonairlines": {
+        "SB", "AU", "FJ", "VU", "PG",
+    },
+    "superairjet": {
+        "ID",
+    },
+    "transnusa": {
+        "ID", "MY", "CN",
+    },
+    # ── EveryMundo airTRFX connectors (batch 3) ──
+    "caribbeanairlines": {
+        "TT", "JM", "BB", "GD", "LC", "VC", "DM", "CW", "BS", "SX",
+        "GP", "MQ", "CU", "GY", "SR", "US", "CA",
+    },
+    "rwandair": {
+        "RW", "KE", "UG", "TZ", "BI", "SS", "ET", "ZA", "ZW", "ZM",
+        "MZ", "NG", "GH", "CI", "SN", "CM", "CG", "CD", "GA", "AO",
+        "FR", "GB", "BE", "NL", "PL", "AE", "QA", "IN", "CN",
+    },
+    "airseychelles": {
+        "SC", "KE", "TZ", "ET", "ZA", "MU", "MG", "RE", "AE",
+        "IN", "LK", "TH", "MY", "MV", "FR", "IT", "IL",
+    },
+    "airgreenland": {
+        "GL", "DK", "IS",
+    },
+    "starlux": {
+        "TW", "JP", "KR", "SG", "TH", "MY", "VN", "PH", "HK", "MO", "US",
+    },
+    "azoresairlines": {
+        "PT", "GB", "FR", "NL", "DE", "ES", "IT", "US", "CA",
+    },
+    "cyprusairways": {
+        "CY", "GR", "AE", "IL", "LB", "FR", "IT", "ES",
+    },
+    # ── New OTA/meta connectors (Instance B batch) ──
+    "skiplagged": {
+        "US", "CA", "MX", "GB", "DE", "FR", "ES", "IT", "NL", "IE",
+        "JP", "KR", "AU", "NZ", "TH", "IN", "CO", "BR", "CL", "PE",
+    },
+    # ── Instance A OTA/meta connectors ──
+    "etraveli": {
+        "SE", "NO", "DK", "FI", "GB", "IE", "DE", "FR", "ES", "IT", "PT",
+        "NL", "BE", "AT", "CH", "PL", "CZ", "GR", "HU", "RO", "HR", "BG",
+        "US", "CA", "AE", "TH", "IN", "AU", "NZ", "BR", "TR", "EG",
+    },
+    # DEAD: Travelgenio backend APIs all return 404 (decommissioned 2026-03)
+    # "travelgenio": {
+    #     "ES", "IT", "FR", "PT", "DE", "GB", "AR", "BR", "MX", "CO", "CL",
+    #     "PE", "US", "CA", "AE", "IN", "AU",
+    # },
+    "ixigo": {
+        "IN", "LK", "NP", "BD", "PK", "MV", "BT",
+        "AE", "SA", "QA", "KW", "OM", "BH",
+        "TH", "SG", "MY", "ID", "VN",
+        "GB", "US", "CA", "AU", "DE", "FR",
+    },
+    "rehlat": {
+        "KW", "SA", "AE", "BH", "OM", "QA",
+        "EG", "JO", "LB", "IQ", "IR",
+        "IN", "PK", "BD", "LK",
+        "TH", "MY", "SG", "PH", "ID",
+        "GB", "DE", "FR", "TR",
+    },
+    "travelstart": {
+        "ZA", "NG", "KE", "EG", "GH", "TZ", "ET", "MA", "TN", "DZ",
+        "MU", "SN", "CI", "CM", "UG", "ZW", "MZ", "BW", "NA", "RW",
+        "AE", "SA", "QA", "TR", "IN", "GB", "FR", "DE",
+    },
+    # ── Rebuilt CDP Chrome connectors (Instance B batch) ──
+    "aviasales": {
+        "RU", "KZ", "UZ", "TJ", "KG", "BY", "UA", "GE", "AM", "AZ",
+        "TR", "TH", "AE", "IN", "EG", "DE", "IT", "ES", "FR", "GB",
+        "US", "CN", "JP", "KR", "VN", "ID", "MY", "LK", "MV",
+    },
+    "travix": {
+        "NL", "BE", "DE", "FR", "GB", "IE", "AT", "CH", "ES", "IT",
+        "PT", "SE", "NO", "DK", "FI", "PL", "CZ", "GR", "TR",
+        "US", "CA", "AU", "NZ", "TH", "JP", "SG", "IN", "AE", "ZA",
+    },
+    "travelup": {
+        "GB", "IE", "US", "CA", "AE", "IN", "PK", "BD", "LK",
+        "DE", "FR", "ES", "IT", "NL", "TH", "SG", "AU", "NZ",
+    },
+    "lastminute": {
+        "GB", "IE", "DE", "FR", "ES", "IT", "NL", "BE", "AT", "CH",
+        "PT", "SE", "NO", "DK", "FI", "PL", "CZ", "GR", "HU", "RO",
+        "US", "CA", "AU", "NZ", "AE", "TH", "IN", "JP", "BR", "TR",
+    },
+    "byojet": {
+        "AU", "NZ", "SG", "TH", "MY", "ID", "PH", "IN", "JP", "KR",
+        "US", "CA", "GB", "AE", "FJ", "HK", "VN", "CN",
+    },
+    "yatra": {
+        "IN", "AE", "SA", "QA", "OM", "KW", "BH",
+        "SG", "TH", "MY", "LK", "NP", "BD", "PK",
+        "US", "CA", "GB", "DE", "FR", "AU", "HK",
+    },
+    "auntbetty": {
+        "AU", "NZ", "SG", "TH", "MY", "ID", "PH", "IN", "JP", "KR",
+        "US", "CA", "GB", "AE", "FJ", "HK", "VN", "CN",
+    },
+    "flightcatchers": {
+        "GB", "IE", "ES", "PT", "GR", "CY", "TR", "FR", "IT", "MT",
+        "HR", "ME", "BG", "EG", "TN", "MA", "AE", "US",
+    },
+    "traveltrolley": {
+        "GB", "IN", "PK", "BD", "LK", "NP",
+        "AE", "SA", "QA", "OM", "KW", "BH",
+        "KE", "NG", "GH", "ZA", "TZ", "UG",
+        "US", "CA", "TH",
+    },
+    # DEAD: OnTheBeach is package-holiday only, no flight-only search
+    # "onthebeach": {
+    #     "GB", "IE", "ES", "PT", "GR", "CY", "TR", "FR", "IT", "MT",
+    #     "HR", "ME", "BG", "EG", "TN", "MA",
+    # },
+    "agoda": {
+        "TH", "MY", "SG", "ID", "PH", "VN", "JP", "KR", "CN", "HK",
+        "TW", "IN", "AU", "NZ", "AE", "US", "GB", "FR", "DE", "IT",
+        "ES", "NL", "TR", "SA", "QA", "LK", "MV",
+    },
+    "almosafer": {
+        "SA", "AE", "QA", "KW", "BH", "OM",
+        "EG", "JO", "LB", "MA", "TN", "DZ",
+        "IN", "PK", "BD", "LK", "PH",
+        "GB", "FR", "DE", "ES", "IT", "TR", "TH", "MY", "US",
+    },
+    "bookingcom": {
+        "GB", "IE", "DE", "FR", "ES", "IT", "NL", "BE", "AT", "CH",
+        "PT", "SE", "NO", "DK", "FI", "PL", "CZ", "GR", "HU", "RO",
+        "HR", "BG", "TR", "US", "CA", "AU", "NZ", "AE", "SA", "IN",
+        "TH", "SG", "JP", "KR", "CN", "HK", "BR", "MX", "AR", "CO",
+        "ZA", "EG", "MA", "KE", "NG",
+    },
+    "musafir": {
+        "AE", "SA", "QA", "KW", "BH", "OM",
+        "IN", "PK", "LK", "BD",
+        "EG", "JO", "LB",
+        "GB", "US", "TH", "MY", "SG",
+    },
+    "akbartravels": {
+        "IN", "AE", "SA", "QA", "KW", "BH", "OM",
+        "SG", "MY", "TH", "LK", "NP", "BD",
+        "GB", "US", "CA", "AU",
+        "KE", "ET",
+    },
+    "airasiamove": {
+        "MY", "TH", "ID", "PH", "SG", "VN", "KH", "MM", "LA", "BN",
+        "IN", "LK", "JP", "KR", "CN", "TW", "HK",
+        "AU", "NZ", "AE", "SA", "TR",
+    },
+    "despegar": {
+        "AR", "BR", "CL", "CO", "MX", "PE", "EC", "UY", "CR", "PA",
+        "DO", "PR", "US", "IT", "ES", "FR", "PT", "GB", "DE",
+    },
+    "hopper": {
+        "US", "CA", "MX", "GB", "FR", "DE", "ES", "IT", "PT",
+        "CO", "BR", "PE", "CL", "AR",
+        "JP", "KR", "IN", "TH",
+        "AE", "SA",
+    },
 }
 
 
@@ -881,9 +1372,16 @@ def get_relevant_connectors(
 ) -> list[tuple[str, type, float]]:
     """Filter connectors to only those that could serve the given route.
 
-    Returns the subset of connectors whose airlines operate in at least one
-    of the origin or destination countries. If country lookup fails for
-    either airport, all connectors are returned (safe fallback).
+    For aggregators/OTAs (kiwi, traveloka, wego, webjet, tiket), include if
+    EITHER origin or destination country is in their network (they search
+    across many airlines).
+
+    For individual airlines, include only if BOTH origin and destination
+    countries are in their network.  This prevents firing e.g. EasyJet for
+    LHR→DEL just because EasyJet operates in GB.
+
+    If country lookup fails for either airport, all connectors are returned
+    (safe fallback).
 
     Args:
         origin: IATA airport/city code (e.g. "CDG", "LON")
@@ -900,10 +1398,26 @@ def get_relevant_connectors(
     if not origin_country or not dest_country:
         return connectors
 
+    # Aggregators/OTAs search many airlines — use lenient OR filter
+    _AGGREGATOR_KEYS = {
+        "kiwi", "traveloka", "wego", "webjet", "tiket", "tripcom", "cleartrip", "edreams",
+        "opodo", "momondo", "kayak", "cheapflights", "skyscanner",
+        "skiplagged",
+        "etraveli", "ixigo", "rehlat",
+        "travelstart",
+        "aviasales", "travix", "travelup", "lastminute", "byojet", "yatra",
+        "auntbetty", "flightcatchers", "traveltrolley",
+        "agoda", "almosafer", "bookingcom",
+        "musafir",
+        "akbartravels", "airasiamove",
+        "despegar",
+        "hopper",
+    }
+
     relevant = []
     for source, cls, timeout in connectors:
         # Extract airline key from source name (e.g. "easyjet_direct" → "easyjet")
-        airline_key = source.replace("_direct", "").replace("_connector", "")
+        airline_key = source.replace("_direct", "").replace("_connector", "").replace("_ota", "").replace("_meta", "")
 
         # Special: Wizzair is registered as "wizzair" but keyed as "wizz"
         if airline_key == "wizzair":
@@ -914,8 +1428,13 @@ def get_relevant_connectors(
         if countries is None:
             # Unknown airline — always include (safe default)
             relevant.append((source, cls, timeout))
-        elif origin_country in countries or dest_country in countries:
-            relevant.append((source, cls, timeout))
-        # else: skip — neither endpoint is in this airline's network
+        elif airline_key in _AGGREGATOR_KEYS:
+            # Aggregators: include if either country matches
+            if origin_country in countries or dest_country in countries:
+                relevant.append((source, cls, timeout))
+        else:
+            # Individual airlines: must serve both endpoints
+            if origin_country in countries and dest_country in countries:
+                relevant.append((source, cls, timeout))
 
     return relevant

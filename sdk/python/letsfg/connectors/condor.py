@@ -109,6 +109,17 @@ class CondorConnectorClient:
         pass  # Browser is shared singleton
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         """
         Search Condor flights via cookie-farm + curl_cffi direct API.
 
@@ -286,8 +297,9 @@ class CondorConnectorClient:
             domain = c.get("domain", "")
             sess.cookies.set(c["name"], c["value"], domain=domain)
 
+        is_rt = bool(req.return_from)
         params = {
-            "flightMode": "OW",
+            "flightMode": "RT" if is_rt else "OW",
             "advanced": "false",
             "origin": req.origin,
             "destination": req.destination,
@@ -296,6 +308,9 @@ class CondorConnectorClient:
             "currency": "USD",
             "numberOfFlightDays": "1",
         }
+        if is_rt:
+            ret = req.return_from
+            params["returnDate"] = ret.strftime("%Y%m%d") if hasattr(ret, "strftime") else str(ret).replace("-", "")
         if req.children:
             params["children"] = str(req.children)
         if req.infants:
@@ -486,9 +501,10 @@ class CondorConnectorClient:
     # ------------------------------------------------------------------
 
     async def _fill_search_form(self, page, req: FlightSearchRequest) -> bool:
-        # Set one-way (Condor defaults to "Round Trip")
-        await self._set_one_way(page)
-        await asyncio.sleep(0.3)
+        # Set one-way only if NOT round-trip (Condor defaults to "Round Trip")
+        if not req.return_from:
+            await self._set_one_way(page)
+            await asyncio.sleep(0.3)
 
         # Fill origin (Condor labels: "From" / "Input Origin")
         ok = await self._fill_airport_field(page, "From", req.origin, 0)
@@ -504,6 +520,13 @@ class CondorConnectorClient:
 
         # Set date (Condor labels: "Outbound flight on" / "Select dates")
         ok = await self._fill_date(page, req)
+        if not ok:
+            return False
+
+        # Fill return date for round-trip
+        if req.return_from:
+            await asyncio.sleep(0.5)
+            ok = await self._fill_return_date(page, req)
         return ok
 
     async def _fill_airport_field(self, page, label: str, iata: str, index: int) -> bool:
@@ -664,6 +687,59 @@ class CondorConnectorClient:
             logger.warning("Condor: date error: %s", e)
             return False
 
+    async def _fill_return_date(self, page, req: FlightSearchRequest) -> bool:
+        """Click the return date in Condor calendar."""
+        ret = req.return_from
+        ret_label = ret.strftime("%m/%d/%Y") if hasattr(ret, "strftime") else str(ret)
+        try:
+            # Calendar may still be open or we need to click return date area
+            ret_btn = page.get_by_role(
+                "button", name=re.compile(r"fc-booking-return-date-aria-label", re.IGNORECASE)
+            )
+            if await ret_btn.count() > 0:
+                await ret_btn.first.click(timeout=3000)
+                await asyncio.sleep(0.8)
+
+            for _ in range(12):
+                day_btn = page.locator(
+                    f"button[role='gridcell'][aria-label^='{ret_label},']"
+                )
+                if await day_btn.count() > 0:
+                    is_disabled = await day_btn.first.get_attribute("disabled")
+                    aria_disabled = await day_btn.first.get_attribute("aria-disabled")
+                    if is_disabled == "true" or aria_disabled == "true":
+                        logger.warning("Condor: return date %s is disabled", ret_label)
+                        return False
+                    await day_btn.first.click(timeout=3000)
+                    logger.info("Condor: selected return date %s", ret_label)
+                    await asyncio.sleep(0.5)
+                    try:
+                        done_btn = page.get_by_role("button", name="Done")
+                        if await done_btn.count() > 0:
+                            await done_btn.first.click(timeout=2000)
+                            await asyncio.sleep(0.3)
+                    except Exception:
+                        pass
+                    return True
+
+                fwd = page.locator("button:has-text('keyboard_arrow_right')").first
+                if await fwd.count() > 0:
+                    await fwd.click(timeout=2000)
+                    await asyncio.sleep(0.5)
+                    continue
+                fwd2 = page.locator("button[class*='right-6'], button[class*='arrow-right']").first
+                if await fwd2.count() > 0:
+                    await fwd2.click(timeout=2000)
+                    await asyncio.sleep(0.5)
+                    continue
+                break
+
+            logger.warning("Condor: return date %s not found", ret_label)
+            return False
+        except Exception as e:
+            logger.warning("Condor: return date error: %s", e)
+            return False
+
     async def _click_search(self, page) -> None:
         for label in ["Search for flights", "Search flights", "Search", "SEARCH", "Find flights"]:
             try:
@@ -691,28 +767,74 @@ class CondorConnectorClient:
 
         # Condor TCA API format: {data: [[{segment1, vacancyDetails: [...]}], ...], messages: [...]}
         flights_list = None
+        ib_flights_list = None
         if isinstance(data, dict) and "data" in data:
             raw = data["data"]
             if isinstance(raw, list) and raw:
                 # data[0] = outbound flights array, data[1] = inbound (empty for one-way)
                 if isinstance(raw[0], list):
                     flights_list = raw[0]
+                    if len(raw) > 1 and isinstance(raw[1], list) and raw[1]:
+                        ib_flights_list = raw[1]
                 else:
                     flights_list = raw
         elif isinstance(data, list):
             # Might be the raw array directly
             if data and isinstance(data[0], list):
                 flights_list = data[0]
+                if len(data) > 1 and isinstance(data[1], list) and data[1]:
+                    ib_flights_list = data[1]
             else:
                 flights_list = data
 
         if not flights_list:
             return offers
 
+        # Build cheapest IB route if RT
+        _ib_route = None
+        _ib_price = 0.0
+        is_rt = bool(req.return_from) and ib_flights_list
+        if is_rt:
+            best_ib_price = float("inf")
+            best_ib_flight = None
+            for flight in ib_flights_list:
+                if not isinstance(flight, dict):
+                    continue
+                for vc in flight.get("vacancyDetails", []):
+                    price_details = vc.get("priceDetails", [])
+                    if not price_details:
+                        continue
+                    components = price_details[0].get("components", [])
+                    for comp in components:
+                        if comp.get("type") == "GROSS_PRICE":
+                            g = comp.get("value")
+                            if g and round(g / 100.0, 2) < best_ib_price:
+                                best_ib_price = round(g / 100.0, 2)
+                                best_ib_flight = flight
+                            break
+            if best_ib_flight and best_ib_price < float("inf"):
+                _ib_price = best_ib_price
+                ib_legs = best_ib_flight.get("legs") or [best_ib_flight]
+                ib_segs = []
+                for leg in ib_legs:
+                    ib_segs.append(FlightSegment(
+                        airline="DE", airline_name="Condor",
+                        flight_no=f"DE{leg.get('flightNumber', '')}",
+                        origin=leg.get("origin", req.destination),
+                        destination=leg.get("destination", req.origin),
+                        departure=self._parse_condor_dt(leg.get("departure", "")),
+                        arrival=self._parse_condor_dt(leg.get("arrival", "")),
+                        cabin_class="M",
+                    ))
+                ib_dur = 0
+                if ib_segs and ib_segs[0].departure and ib_segs[-1].arrival:
+                    ib_dur = int((ib_segs[-1].arrival - ib_segs[0].departure).total_seconds())
+                _ib_route = FlightRoute(segments=ib_segs, total_duration_seconds=max(ib_dur, 0), stopovers=max(len(ib_segs) - 1, 0))
+
         for flight in flights_list:
             if not isinstance(flight, dict):
                 continue
-            parsed = self._parse_tca_flight(flight, req, booking_url)
+            parsed = self._parse_tca_flight(flight, req, booking_url, _ib_route, _ib_price)
             if parsed:
                 offers.extend(parsed)
 
@@ -720,6 +842,7 @@ class CondorConnectorClient:
 
     def _parse_tca_flight(
         self, flight: dict, req: FlightSearchRequest, booking_url: str,
+        _ib_route: Optional[FlightRoute] = None, _ib_price: float = 0.0,
     ) -> list[FlightOffer]:
         """Parse a single Condor TCA flight with multiple fare bundles."""
         offers: list[FlightOffer] = []
@@ -780,13 +903,17 @@ class CondorConnectorClient:
             cabin = cabin_map.get(compartment, "economy")
             flight_key = f"DE{flight.get('flightNumber', '')}_{tariff}_{compartment}"
 
+            is_rt = _ib_route is not None
+            total_price = round(price + _ib_price, 2) if is_rt else price
+            prefix = "de_rt_" if is_rt else "de_"
+
             offers.append(FlightOffer(
-                id=f"de_{hashlib.md5(flight_key.encode()).hexdigest()[:12]}",
-                price=price,
+                id=f"{prefix}{hashlib.md5(flight_key.encode()).hexdigest()[:12]}",
+                price=total_price,
                 currency=currency,
-                price_formatted=f"{price:.2f} {currency}",
+                price_formatted=f"{total_price:.2f} {currency}",
                 outbound=route,
-                inbound=None,
+                inbound=_ib_route,
                 airlines=["Condor"],
                 owner_airline="DE",
                 booking_url=booking_url,
@@ -850,11 +977,15 @@ class CondorConnectorClient:
     @staticmethod
     def _build_booking_url(req: FlightSearchRequest) -> str:
         dep = req.date_from.strftime("%Y-%m-%d")
-        return (
+        url = (
             f"https://www.condor.com/en/flights?from={req.origin}"
             f"&to={req.destination}&departure={dep}"
             f"&adults={req.adults}&children={req.children}&infants={req.infants}"
         )
+        if req.return_from:
+            ret = req.return_from.strftime("%Y-%m-%d") if hasattr(req.return_from, "strftime") else str(req.return_from)
+            url += f"&returnDate={ret}"
+        return url
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         search_hash = hashlib.md5(f"condor{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
@@ -862,3 +993,24 @@ class CondorConnectorClient:
             search_id=f"fs_{search_hash}", origin=req.origin, destination=req.destination,
             currency=req.currency or "EUR", offers=[], total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_condor_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

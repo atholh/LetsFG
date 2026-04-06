@@ -1,16 +1,12 @@
 """
-Aer Lingus connector — EveryMundo airTRFX fare pages.
+Aer Lingus connector — EveryMundo Sputnik API + airTRFX fare pages.
 
 Aer Lingus (IATA: EI) — DUB hub.
 IAG Group member. 100+ destinations across Europe and transatlantic.
 
-Strategy (httpx, no browser):
-  Aer Lingus uses EveryMundo airTRFX at aerlingus.com.
-  1. Fetch route page: aerlingus.com/en-ie/flights-from-{o}-to-{d}
-  2. Extract __NEXT_DATA__ JSON from <script> tag
-  3. Parse StandardFareModule fares from Apollo GraphQL state
-  4. Filter by origin/destination airport codes and departure date
-  Note: Aer Lingus uses /en-ie/ locale prefix.
+Strategy:
+  Primary: EveryMundo Sputnik grouped-routes API (httpx)
+  Fallback: HTML route page with __NEXT_DATA__ extraction
 """
 
 from __future__ import annotations
@@ -20,19 +16,20 @@ import json
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import httpx
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from airline_routes import city_match_set
+from .browser import get_httpx_proxy_url
+from .airline_routes import city_match_set
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +43,29 @@ _HEADERS = {
     "Accept-Language": "en-IE,en;q=0.9",
 }
 
+_API_URL = "https://openair-california.airtrfx.com/airfare-sputnik-service/v3/ei/fares/grouped-routes"
+_API_KEY = "HeQpRjsFI5xlAaSx2onkjc1HTK0ukqA1IrVvd5fvaMhNtzLTxInTpeYB1MK93pah"
+_SPUTNIK_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Content-Type": "application/json",
+    "Origin": "https://mm-prerendering-static-prod.airtrfx.com",
+    "Referer": "https://mm-prerendering-static-prod.airtrfx.com/",
+    "em-api-key": _API_KEY,
+}
+
+_MARKETS = ["IE", "GB", "US"]
+
 _IATA_TO_SLUG: dict[str, str] = {
     # Ireland
     "DUB": "dublin", "ORK": "cork", "SNN": "shannon",
     "KIR": "tralee", "NOC": "knock",
+    # City codes (multi-airport cities)
+    "LON": "london", "PAR": "paris", "ROM": "rome", "NYC": "new-york",
     # UK
     "LHR": "london", "LGW": "london", "STN": "london",
     "MAN": "manchester", "BHX": "birmingham",
@@ -127,8 +143,8 @@ class AerLingusConnectorClient:
     async def _client(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
             self._http = httpx.AsyncClient(
-                timeout=self.timeout, headers=_HEADERS, follow_redirects=True
-            )
+                timeout=self.timeout, headers=_HEADERS, follow_redirects=True,
+                proxy=get_httpx_proxy_url(),)
         return self._http
 
     async def close(self):
@@ -136,33 +152,52 @@ class AerLingusConnectorClient:
             await self._http.aclose()
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
-        client = await self._client()
 
-        origin_slug = _IATA_TO_SLUG.get(req.origin)
-        dest_slug = _IATA_TO_SLUG.get(req.destination)
-        if not origin_slug or not dest_slug:
-            logger.warning("AerLingus: unmapped IATA %s or %s", req.origin, req.destination)
-            return self._empty(req)
+        # Primary: Sputnik grouped-routes API
+        offers = await self._try_sputnik(req)
 
-        url = f"{_BASE}/en-ie/flights-from-{origin_slug}-to-{dest_slug}"
-        logger.info("AerLingus: fetching %s", url)
+        # Fallback: HTML route page (__NEXT_DATA__)
+        if not offers:
+            client = await self._client()
+            origin_slug = _IATA_TO_SLUG.get(req.origin)
+            dest_slug = _IATA_TO_SLUG.get(req.destination)
+            if origin_slug and dest_slug:
+                url = f"{_BASE}/en-ie/flights-from-{origin_slug}-to-{dest_slug}"
+                logger.info("AerLingus: Sputnik empty, falling back to HTML %s", url)
+                try:
+                    resp = await client.get(url)
+                    if resp.status_code in (200, 404) and "__NEXT_DATA__" in resp.text:
+                        fares = self._extract_fares(resp.text)
+                        if fares:
+                            # RT: fetch reverse route page for IB fares
+                            ib_fares: list[dict] = []
+                            if req.return_from:
+                                ib_url = f"{_BASE}/en-ie/flights-from-{dest_slug}-to-{origin_slug}"
+                                logger.info("AerLingus: fetching IB fares %s", ib_url)
+                                try:
+                                    ib_resp = await client.get(ib_url)
+                                    if ib_resp.status_code in (200, 404) and "__NEXT_DATA__" in ib_resp.text:
+                                        ib_fares = self._extract_fares(ib_resp.text)
+                                except Exception as ibe:
+                                    logger.warning("AerLingus IB fetch error: %s", ibe)
+                            offers = self._build_offers(fares, req, ib_fares=ib_fares)
+                except Exception as e:
+                    logger.error("AerLingus fetch error: %s", e)
 
-        try:
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                logger.warning("AerLingus: %s returned %d", url, resp.status_code)
-                return self._empty(req)
-        except Exception as e:
-            logger.error("AerLingus fetch error: %s", e)
-            return self._empty(req)
-
-        fares = self._extract_fares(resp.text)
-        if not fares:
-            logger.info("AerLingus: no fares on page %s", url)
-            return self._empty(req)
-
-        offers = self._build_offers(fares, req)
+        if not offers:
+            offers = []
         offers.sort(key=lambda o: o.price if o.price > 0 else float("inf"))
 
         elapsed = time.monotonic() - t0
@@ -177,6 +212,137 @@ class AerLingusConnectorClient:
             offers=offers,
             total_results=len(offers),
         )
+
+    async def _try_sputnik(self, req: FlightSearchRequest) -> list[FlightOffer]:
+        """Try Sputnik grouped-routes API for Aer Lingus fares."""
+        try:
+            dt = req.date_from
+            if isinstance(dt, datetime):
+                dt = dt.date()
+            elif not isinstance(dt, date):
+                dt = datetime.strptime(str(dt), "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            dt = date.today() + timedelta(days=30)
+
+        start = dt - timedelta(days=3)
+        end = dt + timedelta(days=30)
+
+        payload = {
+            "markets": _MARKETS,
+            "languageCode": "en",
+            "dataExpirationWindow": "7d",
+            "datePattern": "dd MMM yy (E)",
+            "outputCurrencies": ["EUR"],
+            "departure": {"start": start.isoformat(), "end": end.isoformat()},
+            "budget": {"maximum": None},
+            "passengers": {"adults": max(1, req.adults or 1)},
+            "travelClasses": ["ECONOMY"],
+            "flightType": "ROUND_TRIP" if req.return_from else "ONE_WAY",
+            "flexibleDates": True,
+            "faresPerRoute": "10",
+            "trfxRoutes": True,
+            "routesLimit": 500,
+            "sorting": [{"popularity": "DESC"}],
+            "airlineCode": "ei",
+        }
+
+        try:
+            from curl_cffi.requests import AsyncSession
+            async with AsyncSession(impersonate="chrome") as s:
+                r = await s.post(_API_URL, json=payload, headers=_SPUTNIK_HEADERS, timeout=self.timeout)
+            if r.status_code != 200:
+                logger.info("AerLingus Sputnik: HTTP %d", r.status_code)
+                return []
+            data = r.json()
+            if not isinstance(data, list):
+                return []
+        except Exception as e:
+            logger.info("AerLingus Sputnik error: %s", e)
+            return []
+
+        origin_set = city_match_set(req.origin)
+        dest_set = city_match_set(req.destination)
+
+        offers = []
+        for route in data:
+            for fare in route.get("fares") or []:
+                orig = (fare.get("originAirportCode") or route.get("origin") or "").upper()
+                dest = (fare.get("destinationAirportCode") or route.get("destination") or "").upper()
+                if orig not in origin_set or dest not in dest_set:
+                    continue
+
+                price = fare.get("totalPrice") or fare.get("usdTotalPrice")
+                if not price or float(price) <= 0:
+                    continue
+                if fare.get("redemption"):
+                    continue
+
+                price_f = round(float(price), 2)
+                currency = fare.get("currencyCode") or "EUR"
+                dep_str = (fare.get("departureDate") or "")[:10]
+                ret_str = (fare.get("returnDate") or "")[:10]
+                cabin = (fare.get("farenetTravelClass") or "ECONOMY").lower()
+
+                dep_dt = datetime(2000, 1, 1)
+                if dep_str:
+                    try:
+                        dep_dt = datetime.strptime(dep_str, "%Y-%m-%d")
+                    except ValueError:
+                        pass
+
+                seg = FlightSegment(
+                    airline="EI", airline_name="Aer Lingus", flight_no="",
+                    origin=orig, destination=dest,
+                    origin_city=fare.get("originCity") or "",
+                    destination_city=fare.get("destinationCity") or "",
+                    departure=dep_dt, arrival=dep_dt,
+                    duration_seconds=0, cabin_class=cabin,
+                )
+                outbound = FlightRoute(segments=[seg], total_duration_seconds=0, stopovers=0)
+
+                inbound = None
+                if ret_str:
+                    try:
+                        ret_dt = datetime.strptime(ret_str, "%Y-%m-%d")
+                    except ValueError:
+                        ret_dt = dep_dt
+                    ret_seg = FlightSegment(
+                        airline="EI", airline_name="Aer Lingus", flight_no="",
+                        origin=dest, destination=orig,
+                        origin_city=fare.get("destinationCity") or "",
+                        destination_city=fare.get("originCity") or "",
+                        departure=ret_dt, arrival=ret_dt,
+                        duration_seconds=0, cabin_class=cabin,
+                    )
+                    inbound = FlightRoute(segments=[ret_seg], total_duration_seconds=0, stopovers=0)
+
+                ret_token = f"_{ret_str}" if ret_str else ""
+                fid = hashlib.md5(
+                    f"ei_{orig}_{dest}_{dep_str}{ret_token}_{price_f}".encode()
+                ).hexdigest()[:12]
+
+                offers.append(FlightOffer(
+                    id=f"ei_{fid}",
+                    price=price_f,
+                    currency=currency,
+                    price_formatted=fare.get("formattedTotalPrice") or f"{price_f:.2f} {currency}",
+                    outbound=outbound,
+                    inbound=inbound,
+                    airlines=["Aer Lingus"],
+                    owner_airline="EI",
+                    booking_url=f"{_BASE}/booking/select-flights",
+                    is_locked=False,
+                    source="aerlingus_direct",
+                    source_tier="free",
+                    conditions={
+                        "trip_type": (fare.get("flightType") or "ROUND_TRIP").lower().replace("_", "-"),
+                        "cabin": str(fare.get("formattedTravelClass") or cabin),
+                        "fare_note": "Published fare from Aer Lingus fare module",
+                    },
+                ))
+
+        logger.info("AerLingus Sputnik %s→%s: %d offers", req.origin, req.destination, len(offers))
+        return offers
 
     @staticmethod
     def _extract_fares(html: str) -> list[dict]:
@@ -214,8 +380,9 @@ class AerLingusConnectorClient:
                     all_fares.append(f)
         return all_fares
 
-    def _build_offers(self, fares: list[dict], req: FlightSearchRequest) -> list[FlightOffer]:
+    def _build_offers(self, fares: list[dict], req: FlightSearchRequest, *, ib_fares: list[dict] | None = None) -> list[FlightOffer]:
         target_date = req.date_from.strftime("%Y-%m-%d")
+        ret_date = req.return_from.strftime("%Y-%m-%d") if req.return_from else None
         offers: list[FlightOffer] = []
 
         valid_origins = city_match_set(req.origin)
@@ -243,14 +410,13 @@ class AerLingusConnectorClient:
             orig = fare.get("originAirportCode", "")
             dest = fare.get("destinationAirportCode", "")
 
-            dep_date = fare.get("departureDate", "")
-
             price = fare.get("totalPrice")
             if not price or float(price) <= 0:
                 continue
 
             currency = fare.get("currencyCode") or "EUR"
             price_f = round(float(price), 2)
+            dep_date = fare.get("departureDate", "")
 
             dep_dt = datetime(2000, 1, 1)
             if dep_date:
@@ -275,25 +441,64 @@ class AerLingusConnectorClient:
             )
             route = FlightRoute(segments=[seg], total_duration_seconds=0, stopovers=0)
 
+            # ── IB route from reverse-page fares ──
+            _ib_route = None
+            _ib_price = 0.0
+            if ret_date and ib_fares:
+                best_ib = None
+                best_ib_exact = None
+                for ibf in ib_fares:
+                    ibp = ibf.get("totalPrice")
+                    if not ibp or float(ibp) <= 0:
+                        continue
+                    ib_dep = (ibf.get("departureDate") or "")[:10]
+                    if ib_dep == ret_date:
+                        if best_ib_exact is None or float(ibp) < float(best_ib_exact.get("totalPrice", 9e9)):
+                            best_ib_exact = ibf
+                    if best_ib is None or float(ibp) < float(best_ib.get("totalPrice", 9e9)):
+                        best_ib = ibf
+                chosen_ib = best_ib_exact or best_ib
+                if chosen_ib:
+                    _ib_price = round(float(chosen_ib["totalPrice"]), 2)
+                    ib_dep_str = (chosen_ib.get("departureDate") or ret_date)[:10]
+                    try:
+                        ib_dt = datetime.strptime(ib_dep_str, "%Y-%m-%d")
+                    except ValueError:
+                        ib_dt = datetime(2000, 1, 1)
+                    ib_seg = FlightSegment(
+                        airline="EI", airline_name="Aer Lingus", flight_no="",
+                        origin=req.destination, destination=req.origin,
+                        departure=ib_dt, arrival=ib_dt,
+                        duration_seconds=0, cabin_class=cabin,
+                    )
+                    _ib_route = FlightRoute(segments=[ib_seg], total_duration_seconds=0, stopovers=0)
+
+            total_price = round(price_f + _ib_price, 2) if _ib_route else price_f
+            id_prefix = "ei_rt_" if _ib_route else "ei_"
+
             fid = hashlib.md5(
-                f"ei_{orig}{dest}{dep_date}{price_f}{cabin}".encode()
+                f"ei_{orig}{dest}{dep_date}{total_price}{cabin}{ret_date or ''}".encode()
             ).hexdigest()[:12]
 
+            bk_url = (
+                f"https://www.aerlingus.com/booking/select-flights"
+                f"?origin={req.origin}&destination={req.destination}"
+                f"&date={target_date}"
+                f"&adults={req.adults or 1}"
+            )
+            if _ib_route and ret_date:
+                bk_url += f"&returnDate={ret_date}"
+
             offers.append(FlightOffer(
-                id=f"ei_{fid}",
-                price=price_f,
+                id=f"{id_prefix}{fid}",
+                price=total_price,
                 currency=currency,
-                price_formatted=fare.get("formattedTotalPrice") or f"{price_f:.2f} {currency}",
+                price_formatted=f"{total_price:.2f} {currency}",
                 outbound=route,
-                inbound=None,
+                inbound=_ib_route,
                 airlines=["Aer Lingus"],
                 owner_airline="EI",
-                booking_url=(
-                    f"https://www.aerlingus.com/booking/select-flights"
-                    f"?origin={req.origin}&destination={req.destination}"
-                    f"&date={target_date}"
-                    f"&adults={req.adults or 1}"
-                ),
+                booking_url=bk_url,
                 is_locked=False,
                 source="aerlingus_direct",
                 source_tier="free",
@@ -311,3 +516,24 @@ class AerLingusConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_aerl_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

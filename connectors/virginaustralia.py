@@ -1,195 +1,120 @@
 """
-Virgin Australia connector — Sabre DX GraphQL real-time search.
+Virgin Australia connector — Australia's second-largest airline.
 
 Virgin Australia (IATA: VA) — SYD/MEL/BNE hubs.
 110+ domestic and short-haul international routes (NZ, Fiji, Bali).
 
-Strategy (Playwright + GraphQL):
-  VA's booking engine runs Sabre Digital Experience (DX) at
-  book.virginaustralia.com/dx/VADX/.  The SPA calls a GraphQL endpoint
-  /api/graphql that returns branded fare results with full availability.
+Strategy:
+  VA exposes a public JSON feed of promotional/sale fares at:
+    GET https://www.virginaustralia.com/feeds/specials.fares_by_origin.json
 
-  Headless=True gets 403 (bot detection), so we use headed Chrome
-  pushed off-screen with --window-position=-2400,-2400.
+  Returns ~170KB JSON keyed by origin IATA (lowercase):
+    { "syd": { "port_name":"Sydney", "sale_items": [
+        { "origin":"SYD", "destination":"MEL", "cabin":"Economy",
+          "from_price":79, "display_price":79, "dir":"One Way",
+          "travel_periods": [{"start_date":1776211200,"end_date":1782086400,
+                              "from_price":79,"fare_brand":"choice"}],
+          "url":"https://www.virginaustralia.com/au/en/specials/the-sale/",
+          ... }, ...
+    ]}}
 
-  1. Launch Chrome → navigate to book.virginaustralia.com/dx/VADX/#/flight-search
-  2. page.evaluate(fetch('/api/graphql')) with RT MATRIX query
-     (API requires round-trip; we add a dummy return leg +5 days)
-  3. Parse:
-     a) brandedResults.itineraryPartBrands[0] for exact-date outbound results
-     b) Fallback: bundledAlternateDateOffers matching the outbound date
-  4. The response uses @ref/@id deduplication for itinerary parts.
-
-  Session setup: ~12-15s.  Each search: ~3-5s.
+  ~70 domestic AUS routes with real AUD prices. For each matching O/D pair
+  we check whether the requested travel date falls inside any travel_period.
+  Feed is cached for the lifetime of the client instance.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
-from models.flights import (
+import httpx
+
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
-from connectors.browser import (
-    _launched_pw_instances,
-    acquire_browser_slot,
-    release_browser_slot,
-)
+from .browser import get_httpx_proxy_url
+from .airline_routes import city_match_set
 
 logger = logging.getLogger(__name__)
 
-_BOOKING_URL = "https://book.virginaustralia.com/dx/VADX/#/flight-search"
-_SESSION_MAX_AGE = 10 * 60  # Refresh session every 10 min
-
-_GQL_QUERY = """query bookingAirSearch($airSearchInput: CustomAirSearchInput) {
-  bookingAirSearch(airSearchInput: $airSearchInput) {
-    originalResponse
-  }
-}"""
-
-# Shared browser state (module-level singleton)
-_farm_lock: Optional[asyncio.Lock] = None
-_pw_instance = None
-_browser = None
-_page = None
-_session_ts: float = 0.0
-
-
-async def _get_lock() -> asyncio.Lock:
-    global _farm_lock
-    if _farm_lock is None:
-        _farm_lock = asyncio.Lock()
-    return _farm_lock
-
-
-async def _ensure_session():
-    """Return a live page with VA session cookies, refreshing if needed."""
-    global _page, _session_ts
-
-    age = time.monotonic() - _session_ts
-    if _page and age < _SESSION_MAX_AGE:
-        try:
-            await _page.evaluate("1+1")
-            return _page
-        except Exception:
-            pass
-
-    return await _refresh_session()
-
-
-async def _refresh_session():
-    """Create Playwright session on VA booking SPA."""
-    global _pw_instance, _browser, _page, _session_ts
-
-    if _page:
-        try:
-            await _page.close()
-        except Exception:
-            pass
-        _page = None
-
-    if _browser:
-        try:
-            await _browser.close()
-        except Exception:
-            pass
-        _browser = None
-
-    if _pw_instance:
-        try:
-            await _pw_instance.stop()
-        except Exception:
-            pass
-        _pw_instance = None
-
-    from playwright.async_api import async_playwright
-
-    pw = await async_playwright().start()
-    _pw_instance = pw
-    _launched_pw_instances.append(pw)
-
-    browser = await pw.chromium.launch(
-        headless=False, channel="chrome",
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--window-position=-2400,-2400",
-            "--window-size=1366,768",
-        ],
-    )
-    _browser = browser
-
-    ctx = await browser.new_context(
-        viewport={"width": 1366, "height": 768},
-        locale="en-AU",
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
-        ),
-    )
-
-    page = await ctx.new_page()
-    await page.add_init_script(
-        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
-    )
-
-    try:
-        await page.goto(_BOOKING_URL, wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(3)
-        _page = page
-        _session_ts = time.monotonic()
-        logger.info("Virgin Australia: session established")
-        return _page
-    except Exception as e:
-        logger.error("Virgin Australia: session setup failed: %s", e)
-        try:
-            await page.close()
-        except Exception:
-            pass
-        return None
+_FARES_URL = "https://www.virginaustralia.com/feeds/specials.fares_by_origin.json"
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Accept-Language": "en-AU,en;q=0.9",
+}
 
 
 class VirginAustraliaConnectorClient:
-    """Virgin Australia — Sabre DX GraphQL real-time search (Playwright)."""
+    """Virgin Australia — public promotional fares feed (httpx, no auth)."""
 
-    def __init__(self, timeout: float = 45.0):
+    def __init__(self, timeout: float = 20.0):
         self.timeout = timeout
+        self._http: Optional[httpx.AsyncClient] = None
+        self._feed_cache: Optional[dict] = None
+
+    async def _client(self) -> httpx.AsyncClient:
+        if self._http is None or self._http.is_closed:
+            self._http = httpx.AsyncClient(
+                timeout=self.timeout, headers=_HEADERS, follow_redirects=True,
+                proxy=get_httpx_proxy_url(),)
+        return self._http
 
     async def close(self):
-        pass  # Browser session is module-level singleton, reused across calls
+        if self._http and not self._http.is_closed:
+            await self._http.aclose()
+
+    async def _load_feed(self) -> dict:
+        if self._feed_cache is not None:
+            return self._feed_cache
+        client = await self._client()
+        resp = await client.get(_FARES_URL)
+        resp.raise_for_status()
+        self._feed_cache = resp.json()
+        return self._feed_cache
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
-        lock = await _get_lock()
         offers: list[FlightOffer] = []
 
-        async with lock:
-            await acquire_browser_slot()
-            try:
-                page = await _ensure_session()
-                if page:
-                    raw = await self._gql_search(page, req)
-                    if raw:
-                        offers = self._parse(raw, req)
-            except Exception as e:
-                logger.error("VirginAustralia search error: %s", e)
-            finally:
-                release_browser_slot()
+        try:
+            feed = await self._load_feed()
+            offers = self._parse(feed, req)
+        except Exception as e:
+            logger.error("VirginAustralia feed error: %s", e)
 
-        offers.sort(key=lambda o: o.price if o.price > 0 else float("inf"))
+        offers.sort(key=lambda o: o.price)
         elapsed = time.monotonic() - t0
-        logger.info("VirginAustralia %s→%s: %d offers in %.1fs",
-                     req.origin, req.destination, len(offers), elapsed)
+        logger.info(
+            "VirginAustralia %s→%s: %d offers in %.1fs",
+            req.origin, req.destination, len(offers), elapsed,
+        )
 
-        sh = hashlib.md5(f"va{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        sh = hashlib.md5(
+            f"va{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
+        ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{sh}",
             origin=req.origin,
@@ -199,253 +124,151 @@ class VirginAustraliaConnectorClient:
             total_results=len(offers),
         )
 
-    async def _gql_search(self, page, req: FlightSearchRequest) -> Optional[dict]:
-        """Execute GraphQL bookingAirSearch via page.evaluate(fetch)."""
-        dep = req.date_from.strftime("%Y-%m-%d")
-        ret = (req.date_from + timedelta(days=5)).strftime("%Y-%m-%d")
-        adults = req.adults or 1
-
-        result = await page.evaluate("""async ([origin, dest, dep, ret, adults, query]) => {
-            const variables = {
-                airSearchInput: {
-                    searchType: "MATRIX",
-                    itineraryParts: [
-                        {from: {code: origin}, to: {code: dest}, when: {date: dep}},
-                        {from: {code: dest}, to: {code: origin}, when: {date: ret}}
-                    ],
-                    passengers: {ADT: adults}
-                }
-            };
-            try {
-                const resp = await fetch('/api/graphql', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'x-sabre-storefront': 'VADX'
-                    },
-                    body: JSON.stringify({query: query, variables: variables})
-                });
-                if (!resp.ok) return {error: resp.status};
-                return await resp.json();
-            } catch(e) { return {error: e.message}; }
-        }""", [req.origin, req.destination, dep, ret, adults, _GQL_QUERY])
-
-        if isinstance(result, dict) and "error" in result:
-            logger.warning("VA GraphQL error: %s", result["error"])
-            # Force session refresh on next call
-            global _session_ts
-            _session_ts = 0.0
-            return None
-
-        try:
-            return result["data"]["bookingAirSearch"]["originalResponse"]
-        except (KeyError, TypeError):
-            logger.warning("VA GraphQL: unexpected response shape")
-            return None
-
-    def _parse(self, data: dict, req: FlightSearchRequest) -> list[FlightOffer]:
-        """Parse Sabre DX branded results into FlightOffer list."""
+    def _parse(self, feed: dict, req: FlightSearchRequest) -> list[FlightOffer]:
         offers: list[FlightOffer] = []
-        currency = data.get("currency", "AUD")
-        target_date = req.date_from.strftime("%Y-%m-%d")
+        target_ts = int(datetime.combine(req.date_from, datetime.min.time()).timestamp())
+        ret_ts = int(datetime.combine(req.return_from, datetime.min.time()).timestamp()) if req.return_from else 0
+        valid_origins = city_match_set(req.origin)
+        valid_dests = city_match_set(req.destination)
 
-        # Strategy 1: brandedResults.itineraryPartBrands[0] (exact date outbound)
-        branded = data.get("brandedResults", {}).get("itineraryPartBrands", [])
-        if branded and len(branded) > 0 and branded[0]:
-            offers = self._parse_branded(branded[0], data, req, currency, target_date)
-            if offers:
-                return offers
+        # Feed is keyed by origin IATA (lowercase)
+        origin_data = feed.get(req.origin.lower())
+        if not origin_data or not isinstance(origin_data, dict):
+            return offers
 
-        # Strategy 2: bundledAlternateDateOffers (alternate dates matrix)
-        alt_offers = data.get("bundledAlternateDateOffers", [])
-        if alt_offers:
-            offers = self._parse_alternate(alt_offers, req, currency, target_date)
-
-        return offers
-
-    def _parse_branded(self, part_brands: list, data: dict, req: FlightSearchRequest,
-                       currency: str, target_date: str) -> list[FlightOffer]:
-        """Parse brandedResults.itineraryPartBrands[0] — exact-date outbound flights."""
-        offers: list[FlightOffer] = []
-        for option in part_brands:
-            if not isinstance(option, dict):
+        for item in origin_data.get("sale_items", []):
+            if item.get("origin", "").upper() not in valid_origins:
                 continue
-            segments_data = option.get("segments", [])
-            brand_offers = option.get("brandOffers", [])
-            stops = option.get("stops", 0)
-            total_dur = option.get("totalDuration", 0)
-
-            segments = self._build_segments(segments_data)
-            if not segments:
+            if item.get("destination", "").upper() not in valid_dests:
                 continue
 
-            route = FlightRoute(
-                segments=segments,
-                total_duration_seconds=total_dur * 60,
-                stopovers=stops,
-            )
+            # Check if travel date falls within any travel_period
+            best_price = None
+            best_brand = None
+            for tp in item.get("travel_periods", []):
+                start = tp.get("start_date", 0)
+                end = tp.get("end_date", 0)
+                if start <= target_ts <= end:
+                    tp_price = tp.get("from_price", 0)
+                    if tp_price > 0 and (best_price is None or tp_price < best_price):
+                        best_price = tp_price
+                        best_brand = tp.get("fare_brand", "")
 
-            for bo in brand_offers:
-                price = bo.get("totalAmount") or 0
-                if float(price) <= 0:
-                    continue
-                brand_id = bo.get("brandId", "")
+            # Fallback: if no period matches, use display_price if route matches
+            if best_price is None:
+                dp = item.get("display_price") or item.get("from_price") or 0
+                if dp > 0:
+                    best_price = dp
+                    best_brand = item.get("display_fare_brand", "")
 
-                offers.append(self._make_offer(
-                    segments[0], route, float(price), currency, brand_id, req, target_date
-                ))
-
-        return offers
-
-    def _parse_alternate(self, alt_offers: list, req: FlightSearchRequest,
-                         currency: str, target_date: str) -> list[FlightOffer]:
-        """Parse bundledAlternateDateOffers — multi-date matrix results."""
-        offers: list[FlightOffer] = []
-        # Build @id → object map for resolving @ref pointers
-        id_map: dict[str, dict] = {}
-        self._index_refs(alt_offers, id_map)
-
-        seen_keys: set[str] = set()
-
-        for offer in alt_offers:
-            if not isinstance(offer, dict):
-                continue
-            if offer.get("status") == "UNAVAILABLE" or offer.get("soldout"):
+            if best_price is None or best_price <= 0:
                 continue
 
-            dep_dates = offer.get("departureDates", [])
-            if not dep_dates or dep_dates[0] != target_date:
-                continue
+            # RT: look up reverse route in same feed
+            _ib_route = None
+            _ib_price = 0.0
+            if req.return_from:
+                dest_data = feed.get(req.destination.lower())
+                if dest_data and isinstance(dest_data, dict):
+                    for ib_item in dest_data.get("sale_items", []):
+                        if ib_item.get("destination", "").upper() not in valid_origins:
+                            continue
+                        if ib_item.get("origin", "").upper() not in valid_dests:
+                            continue
+                        ib_best = None
+                        for tp in ib_item.get("travel_periods", []):
+                            start = tp.get("start_date", 0)
+                            end = tp.get("end_date", 0)
+                            if start <= ret_ts <= end:
+                                tp_price = tp.get("from_price", 0)
+                                if tp_price > 0 and (ib_best is None or tp_price < ib_best):
+                                    ib_best = tp_price
+                        if ib_best is None:
+                            dp = ib_item.get("display_price") or ib_item.get("from_price") or 0
+                            if dp > 0:
+                                ib_best = dp
+                        if ib_best and ib_best > 0:
+                            _ib_price = float(ib_best)
+                            ib_dt = datetime.combine(req.return_from, datetime.min.time().replace(hour=8))
+                            ib_seg = FlightSegment(
+                                airline="VA", airline_name="Virgin Australia", flight_no="VA",
+                                origin=req.destination, destination=req.origin,
+                                departure=ib_dt, arrival=ib_dt,
+                            )
+                            _ib_route = FlightRoute(segments=[ib_seg], total_duration_seconds=0, stopovers=0)
+                            break  # take first matching reverse route
 
-            # Extract price from total.alternatives[0][0]
-            total = offer.get("total", {})
-            alts = total.get("alternatives", [])
-            if not alts or not alts[0]:
-                continue
-            price = alts[0][0].get("amount", 0)
-            curr = alts[0][0].get("currency", currency)
-            if float(price) <= 0:
-                continue
+            total_price = round(float(best_price) + _ib_price, 2) if _ib_route else round(float(best_price), 2)
+            id_prefix = "va_rt_" if _ib_route else "va_"
 
-            # Resolve outbound itinerary part (index 0)
-            parts = offer.get("itineraryPart", [])
-            if not parts:
-                continue
+            cabin = item.get("cabin", "Economy")
+            dep_dt = datetime.combine(req.date_from, datetime.min.time().replace(hour=8))
 
-            outbound_part = self._resolve_ref(parts[0], id_map)
-            if not outbound_part:
-                continue
-
-            segments_data = outbound_part.get("segments", [])
-            segments = self._build_segments(segments_data)
-            if not segments:
-                continue
-
-            stops = outbound_part.get("stops", 0)
-            total_dur = outbound_part.get("totalDuration", 0)
-
-            route = FlightRoute(
-                segments=segments,
-                total_duration_seconds=total_dur * 60,
-                stopovers=stops,
-            )
-
-            brand_id = offer.get("brandId", "")
-            # Dedup: same flight + brand = same offer
-            dedup_key = f"{segments[0].flight_no}_{segments[0].departure}_{brand_id}"
-            if dedup_key in seen_keys:
-                continue
-            seen_keys.add(dedup_key)
-
-            # Price is round-trip total; halve for one-way estimate
-            ow_price = round(float(price) / 2, 2)
-
-            offers.append(self._make_offer(
-                segments[0], route, ow_price, curr, brand_id, req, target_date
-            ))
-
-        return offers
-
-    def _index_refs(self, items: list, id_map: dict):
-        """Recursively index all objects with @id for @ref resolution."""
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            if "@id" in item:
-                id_map[item["@id"]] = item
-            for v in item.values():
-                if isinstance(v, list):
-                    self._index_refs(v, id_map)
-                elif isinstance(v, dict) and "@id" in v:
-                    id_map[v["@id"]] = v
-
-    def _resolve_ref(self, obj: dict, id_map: dict) -> Optional[dict]:
-        """Resolve a @ref pointer to its full object, or return obj if inline."""
-        if "@ref" in obj:
-            return id_map.get(obj["@ref"])
-        return obj
-
-    def _build_segments(self, segments_data: list) -> list[FlightSegment]:
-        """Convert API segments to FlightSegment list."""
-        segments: list[FlightSegment] = []
-        for seg in segments_data:
-            if not isinstance(seg, dict):
-                continue
-            fl = seg.get("flight", {})
-            dep_str = seg.get("departure", "")
-            arr_str = seg.get("arrival", "")
-
-            dep_dt = datetime(2000, 1, 1)
-            arr_dt = datetime(2000, 1, 1)
-            try:
-                dep_dt = datetime.fromisoformat(dep_str)
-            except (ValueError, TypeError):
-                pass
-            try:
-                arr_dt = datetime.fromisoformat(arr_str)
-            except (ValueError, TypeError):
-                pass
-
-            airline_code = fl.get("airlineCode", "VA")
-            flight_num = fl.get("flightNumber", "")
-
-            segments.append(FlightSegment(
-                airline=airline_code,
+            seg = FlightSegment(
+                airline="VA",
                 airline_name="Virgin Australia",
-                flight_no=f"{airline_code}{flight_num}",
-                origin=seg.get("origin", ""),
-                destination=seg.get("destination", ""),
+                flight_no="VA",
+                origin=req.origin,
+                destination=req.destination,
                 departure=dep_dt,
-                arrival=arr_dt,
-                duration_seconds=seg.get("duration", 0) * 60,
-                cabin_class=seg.get("cabinClass", "Economy"),
-            ))
-        return segments
+                arrival=dep_dt,
+            )
+            route = FlightRoute(segments=[seg], total_duration_seconds=0, stopovers=0)
 
-    def _make_offer(self, first_seg: FlightSegment, route: FlightRoute,
-                    price: float, currency: str, brand_id: str,
-                    req: FlightSearchRequest, target_date: str) -> FlightOffer:
-        fid = hashlib.md5(
-            f"va_{req.origin}{req.destination}{first_seg.departure}{brand_id}{price}".encode()
-        ).hexdigest()[:12]
-
-        return FlightOffer(
-            id=f"va_{fid}",
-            price=round(price, 2),
-            currency=currency,
-            price_formatted=f"{price:,.2f} {currency}",
-            outbound=route,
-            inbound=None,
-            airlines=["Virgin Australia"],
-            owner_airline="VA",
-            conditions={"fare_brand": brand_id},
-            booking_url=(
-                f"https://www.virginaustralia.com/au/en/"
+            bk_url = item.get("url") or (
+                f"https://www.virginaustralia.com/au/en/booking/flights/search/"
                 f"?origin={req.origin}&destination={req.destination}"
-                f"&date={target_date}"
-                f"&ADT={req.adults or 1}&type=O"
-            ),
-            is_locked=False,
-            source="virginaustralia_direct",
-            source_tier="free",
-        )
+                f"&date={req.date_from.strftime('%Y-%m-%d')}"
+                f"&adults={req.adults or 1}"
+            )
+            if _ib_route and req.return_from:
+                bk_url += f"&returnDate={req.return_from.strftime('%Y-%m-%d')}"
+
+            key = f"va_{req.origin}{req.destination}{total_price}{best_brand}{req.return_from or ''}"
+            oid = hashlib.md5(key.encode()).hexdigest()[:12]
+
+            offers.append(
+                FlightOffer(
+                    id=f"{id_prefix}{oid}",
+                    price=total_price,
+                    currency="AUD",
+                    price_formatted=f"{total_price:.2f} AUD",
+                    outbound=route,
+                    inbound=_ib_route,
+                    airlines=["Virgin Australia"],
+                    owner_airline="VA",
+                    conditions={
+                        "cabin": cabin,
+                        "fare_brand": best_brand,
+                        "price_type": "sale_fare",
+                        "connection": item.get("connection", ""),
+                    },
+                    booking_url=bk_url,
+                    is_locked=False,
+                    source="virginaustralia_direct",
+                    source_tier="free",
+                )
+            )
+
+        return offers
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_virg_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

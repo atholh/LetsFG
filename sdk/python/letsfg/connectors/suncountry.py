@@ -95,6 +95,16 @@ class SunCountryConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         try:
             offers = await self._search_via_browser(req)
@@ -275,12 +285,7 @@ class SunCountryConnectorClient:
                                 inbound=cheapest_ib_route,
                                 airlines=["Sun Country Airlines"],
                                 owner_airline="SY",
-                                booking_url=(
-                                    f"https://www.suncountry.com/booking/select"
-                                    f"?origin={req.origin}&destination={req.destination}"
-                                    f"&departureDate={req.date_from.strftime('%m/%d/%Y')}"
-                                    + (f"&returnDate={req.return_from.strftime('%m/%d/%Y')}" if req.return_from else "")
-                                ),
+                                booking_url="https://www.suncountry.com/booking/select",
                                 is_locked=False,
                                 source="suncountry_direct",
                                 source_tier="free",
@@ -301,12 +306,7 @@ class SunCountryConnectorClient:
     ) -> list[FlightOffer]:
         fares = data.get("lowfares") or []
         target = req.date_from.strftime("%Y-%m-%d")
-        booking_url = (
-            f"https://www.suncountry.com/booking/select"
-            f"?origin={req.origin}&destination={req.destination}"
-            f"&departureDate={req.date_from.strftime('%m/%d/%Y')}"
-            + (f"&returnDate={req.return_from.strftime('%m/%d/%Y')}" if req.return_from else "")
-        )
+        booking_url = "https://www.suncountry.com/booking/select"
         offers: list[FlightOffer] = []
 
         for fare in fares:
@@ -390,6 +390,27 @@ class SunCountryConnectorClient:
             results.append((route, round(price, 2)))
 
         return results
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_sunc_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]
 
     @staticmethod
     def _empty(req: FlightSearchRequest) -> FlightSearchResponse:

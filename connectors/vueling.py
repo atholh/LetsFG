@@ -33,13 +33,14 @@ import time
 from datetime import datetime
 from typing import Any, Optional
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import auto_block_if_proxied, get_curl_cffi_proxies, launch_headed_browser
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +190,7 @@ async def _ensure_token() -> str | None:
         return _token
     try:
         from curl_cffi import requests as cffi_requests
-        ses = cffi_requests.Session(impersonate="chrome")
+        ses = cffi_requests.Session(impersonate="chrome", proxies=get_curl_cffi_proxies())
         r = ses.post(_AUTH_URL, json={"profileId": _PROFILE_ID}, timeout=10)
         if r.status_code != 200:
             logger.warning("Vueling auth failed: %s %s", r.status_code, r.text[:200])
@@ -219,16 +220,33 @@ class VuelingConnectorClient:
 
     def __init__(self, timeout: float = 60.0):
         self.timeout = timeout
+        self._route_rejected = False
 
     async def close(self):
         pass  # Browser is shared singleton
 
     # ── Main entry point ─────────────────────────────────
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         # Try direct API first (no browser)
         result = await self._search_via_api(req)
         if result and result.total_results > 0:
             return result
+        # If API explicitly said "no valid markets", the route doesn't exist —
+        # no point launching browser fallback.
+        if self._route_rejected:
+            logger.info("Vueling: route %s->%s not in network, skipping browser", req.origin, req.destination)
+            return result or self._empty(req)
         logger.info("Vueling: API path returned 0 results, trying Playwright fallback")
         return await self._search_via_browser(req)
 
@@ -241,20 +259,30 @@ class VuelingConnectorClient:
         try:
             from curl_cffi import requests as cffi_requests
 
+            criteria = [
+                {
+                    "origin": req.origin,
+                    "destination": req.destination,
+                    "date": req.date_from.strftime("%Y-%m-%d"),
+                }
+            ]
+            itinerary_type = "ONE_WAY"
+            if req.return_from:
+                criteria.append({
+                    "origin": req.destination,
+                    "destination": req.origin,
+                    "date": req.return_from.strftime("%Y-%m-%d"),
+                })
+                itinerary_type = "ROUND_TRIP"
+
             variables = {
                 "requestAVY": {
                     "request": {
-                        "criteria": [
-                            {
-                                "origin": req.origin,
-                                "destination": req.destination,
-                                "date": req.date_from.strftime("%Y-%m-%d"),
-                            }
-                        ],
+                        "criteria": criteria,
                         "cultureCode": "en-GB",
                         "currencyCode": req.currency or "EUR",
                         "flightType": "ALL",
-                        "itineraryType": "ONE_WAY",
+                        "itineraryType": itinerary_type,
                         "maxConnections": 10,
                         "passengers": [
                             {"count": req.adults, "type": "Adult"},
@@ -283,7 +311,7 @@ class VuelingConnectorClient:
                 "Content-Type": "application/json",
             }
 
-            ses = cffi_requests.Session(impersonate="chrome")
+            ses = cffi_requests.Session(impersonate="chrome", proxies=get_curl_cffi_proxies())
             r = ses.post(_GQL_URL, data=payload, headers=headers, timeout=15)
 
             if r.status_code != 200:
@@ -292,16 +320,29 @@ class VuelingConnectorClient:
 
             data = r.json()
             if "errors" in data:
+                errors_str = str(data["errors"])
                 logger.warning("Vueling GQL errors: %s", data["errors"])
+                # "No valid markets" = route doesn't exist, skip browser fallback
+                if "no valid markets" in errors_str.lower():
+                    self._route_rejected = True
                 return None
 
             elapsed = time.monotonic() - t0
-            offers = self._parse_graphql(data, req)
+            outbound_offers = self._parse_graphql(data, req)
+
+            # Parse return journeys + build combos for RT
+            if req.return_from and outbound_offers:
+                inbound_offers = self._parse_graphql_return(data, req)
+                if inbound_offers:
+                    combos = self._build_rt_combos(outbound_offers, inbound_offers, req)
+                    if combos:
+                        outbound_offers = combos + outbound_offers
+
             logger.info(
                 "Vueling API: %d offers %s->%s in %.2fs",
-                len(offers), req.origin, req.destination, elapsed,
+                len(outbound_offers), req.origin, req.destination, elapsed,
             )
-            return self._build_response(offers, req, elapsed)
+            return self._build_response(outbound_offers, req, elapsed)
 
         except Exception as e:
             logger.warning("Vueling API error: %s", e)
@@ -327,9 +368,11 @@ class VuelingConnectorClient:
                 from playwright_stealth import stealth_async
 
                 page = await context.new_page()
+                await auto_block_if_proxied(page)
                 await stealth_async(page)
             except ImportError:
                 page = await context.new_page()
+                await auto_block_if_proxied(page)
 
             # Intercept the GraphQL REQUEST to capture auth + query template
             gql_request: dict = {}
@@ -652,6 +695,131 @@ class VuelingConnectorClient:
         )
         return offers
 
+    def _parse_graphql_return(
+        self, data: dict, req: FlightSearchRequest,
+    ) -> list[FlightOffer]:
+        """Parse return-leg journeys from GraphQL RT response."""
+        ams = data.get("data", {}).get("amsAvy", {})
+        if not ams:
+            return []
+        currency = ams.get("currencyCode", req.currency or "EUR")
+        fare_lookup: dict[str, dict] = {}
+        for fa_entry in ams.get("faresAvailable", []):
+            val = fa_entry.get("value", {})
+            fak = val.get("fareAvailabilityKey", "")
+            if not fak:
+                continue
+            for fare in val.get("fares", []):
+                for pf in fare.get("passengerFares", []):
+                    amount = pf.get("amsFareAmount")
+                    if amount is not None:
+                        existing = fare_lookup.get(fak, {}).get("amount")
+                        if existing is None or amount < existing:
+                            fare_lookup[fak] = {"amount": amount, "productClass": fare.get("productClass", "")}
+
+        trips_list = ams.get("trips", [])
+        if not trips_list:
+            return []
+        # Return journeys are in trips[1] (second trip) or in the second market key
+        inner_trips = trips_list[0].get("trips", [])
+        ret_key = f"{req.destination}|{req.origin}"
+        journeys: list[dict] = []
+        # Check trips[1] first (RT second leg)
+        if len(inner_trips) > 1:
+            for market in inner_trips[1].get("journeysAvailableByMarket", []):
+                if market.get("key", "") == ret_key:
+                    journeys = market.get("value", [])
+                    break
+            if not journeys and inner_trips[1].get("journeysAvailableByMarket"):
+                journeys = inner_trips[1]["journeysAvailableByMarket"][0].get("value", [])
+        # Fallback: check trips[0] for the return key
+        if not journeys and inner_trips:
+            for market in inner_trips[0].get("journeysAvailableByMarket", []):
+                if market.get("key", "") == ret_key:
+                    journeys = market.get("value", [])
+                    break
+
+        if not journeys:
+            return []
+
+        booking_url = self._build_booking_url(req)
+        offers: list[FlightOffer] = []
+        for journey in journeys:
+            if journey.get("notForSale") or journey.get("isSoldOut"):
+                continue
+            des = journey.get("designator", {})
+            best_price: float | None = None
+            best_class = ""
+            for fare in journey.get("fares", []):
+                fak = fare.get("fareAvailabilityKey", "")
+                info = fare_lookup.get(fak)
+                if info and info["amount"] is not None and info["amount"] > 0:
+                    if best_price is None or info["amount"] < best_price:
+                        best_price = info["amount"]
+                        best_class = info.get("productClass", "")
+            if best_price is None:
+                continue
+            segments_data = journey.get("segments", [])
+            flight_segments: list[FlightSegment] = []
+            flight_numbers: list[str] = []
+            for seg in segments_data:
+                ident = seg.get("identifier", {})
+                carrier = ident.get("carrierCode", "VY")
+                flight_num = ident.get("identifier", "")
+                seg_des = seg.get("designator", {})
+                flight_numbers.append(f"{carrier}{flight_num}")
+                flight_segments.append(FlightSegment(
+                    airline=carrier, airline_name="Vueling",
+                    flight_no=f"{carrier}{flight_num}",
+                    origin=seg_des.get("origin", req.destination),
+                    destination=seg_des.get("destination", req.origin),
+                    departure=self._parse_dt(seg_des.get("departure", "")),
+                    arrival=self._parse_dt(seg_des.get("arrival", "")),
+                    cabin_class=best_class or "M",
+                ))
+            if not flight_segments:
+                continue
+            route = FlightRoute(segments=flight_segments, total_duration_seconds=0, stopovers=max(len(segments_data) - 1, 0))
+            dep_str = des.get("departure", "")
+            offer_key = "_".join(flight_numbers) + f"_{dep_str[:10]}_ret"
+            price = round(best_price, 2)
+            offers.append(FlightOffer(
+                id=f"vy_{hashlib.md5(offer_key.encode()).hexdigest()[:12]}",
+                price=price, currency=currency,
+                price_formatted=f"{price:.2f} {currency}",
+                outbound=route, inbound=None,
+                airlines=["Vueling"], owner_airline="VY",
+                booking_url=booking_url, is_locked=False,
+                source="vueling_direct", source_tier="free",
+            ))
+        return offers
+
+    def _build_rt_combos(
+        self,
+        outbound: list[FlightOffer],
+        inbound: list[FlightOffer],
+        req: FlightSearchRequest,
+    ) -> list[FlightOffer]:
+        """Combine outbound × inbound into RT offers."""
+        combos: list[FlightOffer] = []
+        for ob in outbound[:15]:
+            for ib in inbound[:10]:
+                price = round(ob.price + ib.price, 2)
+                combo_key = f"vy_rt_{ob.id}_{ib.id}"
+                combos.append(FlightOffer(
+                    id=f"vy_{hashlib.md5(combo_key.encode()).hexdigest()[:12]}",
+                    price=price, currency=ob.currency,
+                    price_formatted=f"{price:.2f} {ob.currency}",
+                    outbound=ob.outbound, inbound=ib.outbound,
+                    airlines=list(set(ob.airlines + ib.airlines)),
+                    owner_airline="VY",
+                    booking_url=self._build_booking_url(req),
+                    is_locked=False,
+                    source="vueling_direct", source_tier="free",
+                ))
+        combos.sort(key=lambda o: o.price)
+        return combos[:50]
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -665,7 +833,7 @@ class VuelingConnectorClient:
             req.origin, req.destination, len(offers), elapsed,
         )
         search_hash = hashlib.md5(
-            f"vueling{req.origin}{req.destination}{req.date_from}".encode()
+            f"vueling{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{search_hash}",
@@ -707,7 +875,7 @@ class VuelingConnectorClient:
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         search_hash = hashlib.md5(
-            f"vueling{req.origin}{req.destination}{req.date_from}".encode()
+            f"vueling{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{search_hash}",
@@ -717,3 +885,24 @@ class VuelingConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_vuel_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

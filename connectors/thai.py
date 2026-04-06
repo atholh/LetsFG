@@ -25,19 +25,22 @@ from typing import Optional
 
 import httpx
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import get_httpx_proxy_url
 
 logger = logging.getLogger(__name__)
 
 # IATA code -> URL slug mapping for thaiairways.com EveryMundo fare pages.
 # Validated against live site. Slugs are lowercase-hyphenated city names.
 _IATA_TO_SLUG: dict[str, str] = {
+    # City codes (multi-airport cities)
+    "LON": "london", "PAR": "paris", "TYO": "tokyo",
     # Thailand (domestic)
     "BKK": "bangkok",
     "CNX": "chiang-mai",
@@ -130,6 +133,16 @@ class ThaiConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
 
         origin_slug = _IATA_TO_SLUG.get(req.origin)
@@ -146,7 +159,7 @@ class ThaiConnectorClient:
                 timeout=self.timeout,
                 follow_redirects=True,
                 headers=_HEADERS,
-            ) as client:
+                proxy=get_httpx_proxy_url(),) as client:
                 resp = await client.get(url)
 
             if resp.status_code != 200:
@@ -158,7 +171,24 @@ class ThaiConnectorClient:
                 logger.warning("Thai: no fares found on page %s", url)
                 return self._empty(req)
 
-            offers = self._build_offers(fares, req)
+            # ── Round-trip: fetch reverse route page for IB fares ──
+            ib_fares: list[dict] = []
+            if req.return_from:
+                ib_url = f"{_BASE}/flights-from-{dest_slug}-to-{origin_slug}"
+                logger.info("Thai: fetching IB fares %s", ib_url)
+                try:
+                    async with httpx.AsyncClient(
+                        timeout=self.timeout,
+                        follow_redirects=True,
+                        headers=_HEADERS,
+                        proxy=get_httpx_proxy_url(),) as ib_client:
+                        ib_resp = await ib_client.get(ib_url)
+                    if ib_resp.status_code == 200:
+                        ib_fares = self._extract_fares(ib_resp.text)
+                except Exception as e:
+                    logger.warning("Thai IB fetch error: %s", e)
+
+            offers = self._build_offers(fares, req, ib_fares=ib_fares)
             elapsed = time.monotonic() - t0
 
             offers.sort(key=lambda o: o.price)
@@ -168,7 +198,7 @@ class ThaiConnectorClient:
             )
 
             h = hashlib.md5(
-                f"thai{req.origin}{req.destination}{req.date_from}".encode()
+                f"thai{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
             ).hexdigest()[:12]
             return FlightSearchResponse(
                 search_id=f"fs_{h}",
@@ -227,9 +257,10 @@ class ThaiConnectorClient:
         return []
 
     def _build_offers(
-        self, fares: list[dict], req: FlightSearchRequest
+        self, fares: list[dict], req: FlightSearchRequest, *, ib_fares: list[dict] | None = None,
     ) -> list[FlightOffer]:
         target_date = req.date_from.strftime("%Y-%m-%d")
+        ret_date = req.return_from.strftime("%Y-%m-%d") if req.return_from else None
         offers: list[FlightOffer] = []
 
         for fare in fares:
@@ -267,8 +298,43 @@ class ThaiConnectorClient:
                 stopovers=0,
             )
 
+            # ── IB route from reverse-page fares ──
+            _ib_route = None
+            _ib_price = 0.0
+            if ret_date and ib_fares:
+                best_ib = None
+                best_ib_exact = None
+                for ibf in ib_fares:
+                    ibp = ibf.get("totalPrice")
+                    if not ibp or ibp <= 0:
+                        continue
+                    ib_dep = (ibf.get("departureDate") or "")[:10]
+                    if ib_dep == ret_date:
+                        if best_ib_exact is None or ibp < (best_ib_exact.get("totalPrice") or 9e9):
+                            best_ib_exact = ibf
+                    if best_ib is None or ibp < (best_ib.get("totalPrice") or 9e9):
+                        best_ib = ibf
+                chosen_ib = best_ib_exact or best_ib
+                if chosen_ib:
+                    _ib_price = round(float(chosen_ib["totalPrice"]), 2)
+                    ib_dep_str = (chosen_ib.get("departureDate") or ret_date)[:10]
+                    try:
+                        ib_dt = datetime.strptime(ib_dep_str, "%Y-%m-%d")
+                    except ValueError:
+                        ib_dt = datetime(2000, 1, 1)
+                    ib_seg = FlightSegment(
+                        airline="TG", airline_name="Thai Airways", flight_no="",
+                        origin=req.destination, destination=req.origin,
+                        departure=ib_dt, arrival=ib_dt,
+                        duration_seconds=0, cabin_class=(fare.get("formattedTravelClass") or "Economy").lower(),
+                    )
+                    _ib_route = FlightRoute(segments=[ib_seg], total_duration_seconds=0, stopovers=0)
+
+            total_price = round(float(price) + _ib_price, 2) if _ib_route else round(float(price), 2)
+            id_prefix = "tg_rt_" if _ib_route else "tg_"
+
             fid = hashlib.md5(
-                f"tg_{origin_code}{dest_code}{dep_date}{price}".encode()
+                f"tg_{origin_code}{dest_code}{dep_date}{total_price}{ret_date or ''}".encode()
             ).hexdigest()[:12]
 
             offer_booking = (
@@ -277,14 +343,16 @@ class ThaiConnectorClient:
                 f"&depart={dep_date or target_date}"
                 f"&adults={req.adults}&children={req.children}"
             )
+            if _ib_route and ret_date:
+                offer_booking += f"&return={ret_date}"
 
             offers.append(FlightOffer(
-                id=f"tg_{fid}",
-                price=round(float(price), 2),
+                id=f"{id_prefix}{fid}",
+                price=total_price,
                 currency=currency,
-                price_formatted=fare.get("formattedTotalPrice") or f"{price:.2f} {currency}",
+                price_formatted=f"{total_price:.2f} {currency}",
                 outbound=route,
-                inbound=None,
+                inbound=_ib_route,
                 airlines=["Thai Airways"],
                 owner_airline="TG",
                 booking_url=offer_booking,
@@ -297,7 +365,7 @@ class ThaiConnectorClient:
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         h = hashlib.md5(
-            f"thai{req.origin}{req.destination}{req.date_from}".encode()
+            f"thai{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}",
@@ -307,3 +375,24 @@ class ThaiConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_thai_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

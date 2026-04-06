@@ -97,6 +97,17 @@ class AirNewZealandConnectorClient:
             await self._http.aclose()
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         client = await self._client()
 
@@ -111,8 +122,8 @@ class AirNewZealandConnectorClient:
 
         try:
             resp = await client.get(url)
-            if resp.status_code != 200:
-                logger.warning("Air NZ: %s returned %d", url, resp.status_code)
+            if resp.status_code not in (200, 404) or "__NEXT_DATA__" not in resp.text:
+                logger.warning("Air NZ: %s returned %d (no fare data)", url, resp.status_code)
                 return self._empty(req)
         except Exception as e:
             logger.error("Air NZ fetch error: %s", e)
@@ -123,13 +134,24 @@ class AirNewZealandConnectorClient:
             logger.info("Air NZ: no fares on page %s", url)
             return self._empty(req)
 
-        offers = self._build_offers(fares, req)
+        # RT: fetch reverse route for inbound fares
+        ib_fares: list[dict] = []
+        if req.return_from and dest_slug and origin_slug:
+            rev_url = f"{_BASE}/flights/en-nz/flights-from-{dest_slug}-to-{origin_slug}"
+            try:
+                rev_resp = await client.get(rev_url)
+                if rev_resp.status_code == 200 and "__NEXT_DATA__" in rev_resp.text:
+                    ib_fares = self._extract_fares(rev_resp.text)
+            except Exception:
+                pass
+
+        offers = self._build_offers(fares, req, ib_fares=ib_fares)
         offers.sort(key=lambda o: o.price if o.price > 0 else float("inf"))
 
         elapsed = time.monotonic() - t0
         logger.info("Air NZ %s→%s: %d offers in %.1fs", req.origin, req.destination, len(offers), elapsed)
 
-        h = hashlib.md5(f"airnz{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        h = hashlib.md5(f"airnz{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}",
             origin=req.origin,
@@ -176,11 +198,65 @@ class AirNewZealandConnectorClient:
                     all_fares.append(f)
         return all_fares
 
-    def _build_offers(self, fares: list[dict], req: FlightSearchRequest) -> list[FlightOffer]:
+    def _build_offers(self, fares: list[dict], req: FlightSearchRequest, ib_fares: list[dict] | None = None) -> list[FlightOffer]:
         target_date = req.date_from.strftime("%Y-%m-%d")
         offers: list[FlightOffer] = []
         valid_origins = city_match_set(req.origin)
         valid_dests = city_match_set(req.destination)
+
+        # Build cheapest IB route if RT
+        _ib_route: FlightRoute | None = None
+        _ib_price = 0.0
+        if req.return_from and ib_fares:
+            ret_str = req.return_from.strftime("%Y-%m-%d") if hasattr(req.return_from, 'strftime') else str(req.return_from)[:10]
+            best_ib_p = float("inf")
+            best_ib_fare = None
+            # Prefer exact return date match
+            for f in ib_fares:
+                orig = f.get("originAirportCode", "")
+                dest = f.get("destinationAirportCode", "")
+                if orig not in valid_dests or dest not in valid_origins:
+                    continue
+                p = float(f.get("totalPrice", 0) or 0)
+                if p <= 0:
+                    continue
+                dep = (f.get("departureDate", "") or "")[:10]
+                if dep == ret_str and p < best_ib_p:
+                    best_ib_p = p
+                    best_ib_fare = f
+            # Fallback: cheapest overall IB
+            if not best_ib_fare:
+                for f in ib_fares:
+                    orig = f.get("originAirportCode", "")
+                    dest = f.get("destinationAirportCode", "")
+                    if orig not in valid_dests or dest not in valid_origins:
+                        continue
+                    p = float(f.get("totalPrice", 0) or 0)
+                    if 0 < p < best_ib_p:
+                        best_ib_p = p
+                        best_ib_fare = f
+            if best_ib_fare and best_ib_p < float("inf"):
+                _ib_price = round(best_ib_p, 2)
+                ib_dep = (best_ib_fare.get("departureDate", "") or "")[:10]
+                ib_dep_dt = datetime(2000, 1, 1)
+                if ib_dep:
+                    try:
+                        ib_dep_dt = datetime.strptime(ib_dep, "%Y-%m-%d")
+                    except ValueError:
+                        pass
+                _ib_route = FlightRoute(
+                    segments=[FlightSegment(
+                        airline="NZ", airline_name="Air New Zealand", flight_no="",
+                        origin=best_ib_fare.get("originAirportCode", req.destination),
+                        destination=best_ib_fare.get("destinationAirportCode", req.origin),
+                        departure=ib_dep_dt, arrival=ib_dep_dt,
+                        duration_seconds=0,
+                        cabin_class=(best_ib_fare.get("formattedTravelClass") or "Economy").lower(),
+                    )],
+                    total_duration_seconds=0, stopovers=0,
+                )
+
+        is_rt = _ib_route is not None
 
         # Separate exact-date and nearby fares (airTRFX shows cached snapshots)
         exact_fares: list[dict] = []
@@ -211,6 +287,8 @@ class AirNewZealandConnectorClient:
 
             currency = fare.get("currencyCode") or "USD"
             price_f = round(float(price), 2)
+            total_price = round(price_f + _ib_price, 2) if is_rt else price_f
+            prefix = "nz_rt_" if is_rt else "nz_"
 
             dep_dt = datetime(2000, 1, 1)
             if dep_date:
@@ -236,24 +314,29 @@ class AirNewZealandConnectorClient:
             route = FlightRoute(segments=[seg], total_duration_seconds=0, stopovers=0)
 
             fid = hashlib.md5(
-                f"nz_{orig}{dest}{dep_date}{price_f}{cabin}".encode()
+                f"nz_{orig}{dest}{dep_date}{total_price}{cabin}".encode()
             ).hexdigest()[:12]
 
+            burl = (
+                f"https://www.airnewzealand.co.nz/booking/flights"
+                f"?origin={req.origin}&destination={req.destination}"
+                f"&date={target_date}"
+                f"&adults={req.adults or 1}"
+            )
+            if is_rt and req.return_from:
+                r_str = req.return_from.strftime("%Y-%m-%d") if hasattr(req.return_from, 'strftime') else str(req.return_from)[:10]
+                burl += f"&returnDate={r_str}"
+
             offers.append(FlightOffer(
-                id=f"nz_{fid}",
-                price=price_f,
+                id=f"{prefix}{fid}",
+                price=total_price,
                 currency=currency,
-                price_formatted=fare.get("formattedTotalPrice") or f"{price_f:.2f} {currency}",
+                price_formatted=fare.get("formattedTotalPrice") or f"{total_price:.2f} {currency}",
                 outbound=route,
-                inbound=None,
+                inbound=_ib_route,
                 airlines=["Air New Zealand"],
                 owner_airline="NZ",
-                booking_url=(
-                    f"https://www.airnewzealand.co.nz/booking/flights"
-                    f"?origin={req.origin}&destination={req.destination}"
-                    f"&date={target_date}"
-                    f"&adults={req.adults or 1}"
-                ),
+                booking_url=burl,
                 is_locked=False,
                 source="airnewzealand_direct",
                 source_tier="free",
@@ -262,7 +345,7 @@ class AirNewZealandConnectorClient:
         return offers
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
-        h = hashlib.md5(f"airnz{req.origin}{req.destination}{req.date_from}".encode()).hexdigest()[:12]
+        h = hashlib.md5(f"airnz{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}",
             origin=req.origin,
@@ -271,3 +354,24 @@ class AirNewZealandConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_airnz_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

@@ -52,10 +52,6 @@ def _as_date(value):
     return value
 
 
-def _trip_type_for_request(req: FlightSearchRequest) -> str:
-    return "ROUND_TRIP" if req.return_from else "ONE_WAY"
-
-
 def _build_route(origin, destination, travel_date):
     departure_dt = datetime.combine(travel_date, dt_time(0, 0))
     segment = FlightSegment(
@@ -92,7 +88,18 @@ class AirfranceConnectorClient:
         if self._http and not self._http.is_closed:
             await self._http.aclose()
 
-    async def search_flights(self, req):
+    async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req):
         started = time.monotonic()
         offers = []
 
@@ -145,7 +152,7 @@ class AirfranceConnectorClient:
             "budget": {"maximum": None},
             "passengers": {"adults": max(1, req.adults or 1)},
             "travelClasses": ["ECONOMY"],
-            "flightType": _trip_type_for_request(req),
+            "flightType": "ROUND_TRIP" if req.return_from else "ONE_WAY",
             "flexibleDates": True,
             "faresPerRoute": "10",
             "trfxRoutes": True,
@@ -190,7 +197,6 @@ class AirfranceConnectorClient:
 
     def _build_offers(self, cards, req):
         offers = []
-        wants_round_trip = req.return_from is not None
         # Expand city codes so "LON" matches LHR/LGW/STN etc. (includes input code itself)
         origin_set = city_match_set(req.origin)
         dest_set = city_match_set(req.destination)
@@ -207,7 +213,7 @@ class AirfranceConnectorClient:
             actual_origin = card["origin"]
             outbound = _build_route(actual_origin, req.destination, card["departure_date"])
             inbound = None
-            if wants_round_trip and card.get("return_date"):
+            if card.get("return_date"):
                 inbound = _build_route(req.destination, actual_origin, card["return_date"])
 
             price = round(card["price"], 2)
@@ -226,12 +232,12 @@ class AirfranceConnectorClient:
                 inbound=inbound,
                 airlines=["Air France"],
                 owner_airline="AF",
-                booking_url=f"{_HOME_URL}/search/offers?origin={actual_origin}&destination={req.destination}&outboundDate={card['departure_date'].isoformat()}&adults={req.adults or 1}",
+                booking_url=_HOME_URL,
                 is_locked=False,
                 source="airfrance_direct",
                 source_tier="free",
                 conditions={
-                    "trip_type": "round-trip" if wants_round_trip else "one-way",
+                    "trip_type": card.get("trip_type", "round-trip"),
                     "cabin": str(card.get("cabin") or "Economy"),
                     "fare_note": "Promo fare from Air France embedded fare module",
                     "actual_origin": actual_origin,
@@ -239,3 +245,24 @@ class AirfranceConnectorClient:
             ))
 
         return offers
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_airf_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

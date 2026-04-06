@@ -36,7 +36,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Optional
 
-from models.flights import (
+from ..models.flights import (
     AirlineSummary,
     FlightOffer,
     FlightRoute,
@@ -44,6 +44,8 @@ from models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import auto_block_if_proxied, find_chrome, proxy_chrome_args
+from .airline_routes import get_city_airports
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,7 @@ _CHROME_FLAGS = [
     "--force-color-profile=srgb",
     "--metrics-recording-only",
     "--no-first-run",
+    *proxy_chrome_args(),
     "--password-store=basic",
     "--no-service-autorun",
     "--disable-search-engine-choice-screen",
@@ -156,7 +159,7 @@ async def _get_browser():
             pass
 
         # Launch real Chrome subprocess
-        from connectors.browser import find_chrome
+        from .browser import find_chrome
 
         chrome = find_chrome()
         os.makedirs(_USER_DATA_DIR, exist_ok=True)
@@ -239,6 +242,39 @@ class AmericanConnectorClient:
     async def search_flights(
         self, req: FlightSearchRequest
     ) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(
+        self, req: FlightSearchRequest
+    ) -> FlightSearchResponse:
+        # Expand city codes (LON → LHR) — AA form needs airport codes
+        origins = get_city_airports(req.origin)
+        if len(origins) > 1:
+            req = FlightSearchRequest(
+                origin=origins[0], destination=req.destination,
+                date_from=req.date_from, return_from=req.return_from,
+                adults=req.adults, children=req.children, infants=req.infants,
+                cabin_class=req.cabin_class, currency=req.currency,
+                max_stopovers=req.max_stopovers,
+            )
+        dests = get_city_airports(req.destination)
+        if len(dests) > 1:
+            req = FlightSearchRequest(
+                origin=req.origin, destination=dests[0],
+                date_from=req.date_from, return_from=req.return_from,
+                adults=req.adults, children=req.children, infants=req.infants,
+                cabin_class=req.cabin_class, currency=req.currency,
+                max_stopovers=req.max_stopovers,
+            )
+
         t0 = time.monotonic()
 
         for attempt in range(1, _MAX_ATTEMPTS + 1):
@@ -268,6 +304,7 @@ class AmericanConnectorClient:
         ctx = browser.contexts[0]
 
         page = await ctx.new_page()
+        await auto_block_if_proxied(page)
 
         # Block OneTrust / cookie consent resources at page level
         async def _abort_route(route):
@@ -732,6 +769,27 @@ class AmericanConnectorClient:
                 "protocol": "American Airlines direct (aa.com)"
             },
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_amer_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]
 
     @staticmethod
     def _empty(req: FlightSearchRequest) -> FlightSearchResponse:

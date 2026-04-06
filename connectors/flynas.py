@@ -37,13 +37,14 @@ try:
 except ImportError:
     HAS_CURL = False
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import auto_block_if_proxied, get_curl_cffi_proxies, get_default_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ async def _get_context():
             _USER_DATA_DIR,
             channel="chrome",
             headless=False,
+            proxy=get_default_proxy(),
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--window-position=-2400,-2400",
@@ -197,6 +199,7 @@ async def _ensure_warm_page():
             _warm_page = ctx.pages[0]
         else:
             _warm_page = await ctx.new_page()
+            await auto_block_if_proxied(_warm_page)
 
         logger.info("Flynas: loading booking page (Akamai warm-up)...")
         await _warm_page.goto(
@@ -258,7 +261,7 @@ class FlynasConnectorClient:
         Uses a shorter timeout than in-browser path since this is the fast path —
         we want to fail quickly and fall back to the browser if needed.
         """
-        sess = cffi_requests.Session(impersonate=_IMPERSONATE)
+        sess = cffi_requests.Session(impersonate=_IMPERSONATE, proxies=get_curl_cffi_proxies())
 
         # Load all Akamai cookies into session
         for c in _akamai_cookies:
@@ -360,6 +363,17 @@ class FlynasConnectorClient:
     # ------------------------------------------------------------------
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
 
         date_str = req.date_from.strftime("%Y-%m-%d")
@@ -605,3 +619,24 @@ class FlynasConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_flyn_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

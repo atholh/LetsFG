@@ -25,7 +25,7 @@ from typing import Optional
 
 from curl_cffi import requests as creq
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -189,6 +189,16 @@ class IberiaConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
 
         market = _ORIGIN_TO_MARKET.get(req.origin, "gb")
@@ -227,13 +237,57 @@ class IberiaConnectorClient:
             return self._empty(req)
 
         price_f, currency, dest_name = fare
-        offer = self._build_offer(price_f, currency, dest_name, req)
+
+        # RT: fetch reverse fare (dest market → origin) for inbound
+        _ib_route: FlightRoute | None = None
+        _ib_price = 0.0
+        if req.return_from:
+            rev_market = _ORIGIN_TO_MARKET.get(req.destination, "gb")
+            try:
+                rev_fares = await asyncio.get_event_loop().run_in_executor(
+                    None, _get_cached_fares, rev_market
+                )
+            except Exception:
+                rev_fares = {}
+            rev_fare = rev_fares.get(req.origin)
+            if not rev_fare:
+                origin_city = _AIRPORT_TO_CITY.get(req.origin)
+                if origin_city:
+                    rev_fare = rev_fares.get(origin_city)
+            # Fallback to gb market reverse
+            if not rev_fare and rev_market != "gb":
+                try:
+                    rev_gb = await asyncio.get_event_loop().run_in_executor(
+                        None, _get_cached_fares, "gb"
+                    )
+                except Exception:
+                    rev_gb = {}
+                rev_fare = rev_gb.get(req.origin)
+                if not rev_fare:
+                    origin_city = _AIRPORT_TO_CITY.get(req.origin)
+                    if origin_city:
+                        rev_fare = rev_gb.get(origin_city)
+            if rev_fare:
+                ib_price_f, ib_curr, ib_name = rev_fare
+                _ib_price = ib_price_f
+                ret_dt = datetime.combine(req.return_from, datetime.min.time()) if hasattr(req.return_from, 'year') else datetime(2000, 1, 1)
+                _ib_route = FlightRoute(
+                    segments=[FlightSegment(
+                        airline="IB", airline_name="Iberia", flight_no="",
+                        origin=req.destination, destination=req.origin,
+                        departure=ret_dt, arrival=ret_dt,
+                        duration_seconds=0, cabin_class="economy",
+                    )],
+                    total_duration_seconds=0, stopovers=0,
+                )
+
+        offer = self._build_offer(price_f, currency, dest_name, req, _ib_route, _ib_price)
 
         elapsed = time.monotonic() - t0
         logger.info("IB %s→%s: %.2f %s in %.1fs", req.origin, req.destination, price_f, currency, elapsed)
 
         h = hashlib.md5(
-            f"ib{req.origin}{req.destination}{req.date_from}".encode()
+            f"ib{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}",
@@ -250,6 +304,8 @@ class IberiaConnectorClient:
         currency: str,
         dest_name: str,
         req: FlightSearchRequest,
+        _ib_route: FlightRoute | None = None,
+        _ib_price: float = 0.0,
     ) -> FlightOffer:
         target_date = req.date_from.strftime("%Y-%m-%d")
         dep_dt = datetime.combine(req.date_from, datetime.min.time())
@@ -269,38 +325,68 @@ class IberiaConnectorClient:
         )
         route = FlightRoute(segments=[seg], total_duration_seconds=0, stopovers=0)
 
+        is_rt = _ib_route is not None
+        total_price = round(price + _ib_price, 2) if is_rt else price
+        prefix = "ib_rt_" if is_rt else "ib_"
+
         fid = hashlib.md5(
-            f"ib_{req.origin}{req.destination}{price}{currency}".encode()
+            f"ib_{req.origin}{req.destination}{total_price}{currency}".encode()
         ).hexdigest()[:12]
 
         fmt_map = {"GBP": "£", "EUR": "€", "USD": "$"}
         sym = fmt_map.get(currency, currency)
 
+        burl = (
+            f"https://www.iberia.com/gb/flights/"
+            f"?market=gb&language=en"
+            f"&origin={req.origin}&destination={req.destination}"
+            f"&outbound={target_date}"
+            f"&adults={req.adults or 1}"
+        )
+        if is_rt and req.return_from:
+            ret_str = req.return_from.strftime("%Y-%m-%d") if hasattr(req.return_from, 'strftime') else str(req.return_from)
+            burl += f"&inbound={ret_str}"
+
         return FlightOffer(
-            id=f"ib_{fid}",
-            price=price,
+            id=f"{prefix}{fid}",
+            price=total_price,
             currency=currency,
-            price_formatted=f"{sym}{price:.0f}",
+            price_formatted=f"{sym}{total_price:.0f}",
             outbound=route,
-            inbound=None,
+            inbound=_ib_route,
             airlines=["Iberia"],
             owner_airline="IB",
-            booking_url=(
-                f"https://www.iberia.com/gb/flights/"
-                f"?market=gb&language=en"
-                f"&origin={req.origin}&destination={req.destination}"
-                f"&outbound={target_date}"
-                f"&adults={req.adults or 1}"
-            ),
+            booking_url=burl,
             is_locked=False,
             source="iberia_direct",
             source_tier="free",
         )
 
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_iber_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]
+
     @staticmethod
     def _empty(req: FlightSearchRequest) -> FlightSearchResponse:
         h = hashlib.md5(
-            f"ib{req.origin}{req.destination}{req.date_from}".encode()
+            f"ib{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{h}",

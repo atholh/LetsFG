@@ -15,13 +15,15 @@ from typing import Optional
 
 import httpx
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import get_httpx_proxy_url
+from .airline_routes import city_match_set
 
 logger = logging.getLogger(__name__)
 
@@ -79,14 +81,25 @@ class VietnamAirlinesConnectorClient:
                 timeout=self.timeout,
                 headers=_HEADERS,
                 follow_redirects=True,
-            )
+                proxy=get_httpx_proxy_url(),)
         return self._http
 
     async def close(self):
         if self._http and not self._http.is_closed:
             await self._http.aclose()
 
-    async def search_flights(self, req):
+    async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req):
         started = time.monotonic()
         offers = []
 
@@ -177,9 +190,11 @@ class VietnamAirlinesConnectorClient:
 
     def _build_offers(self, cards, req):
         offers = []
+        valid_origins = city_match_set(req.origin)
+        valid_dests = city_match_set(req.destination)
 
         for card in cards:
-            if card["origin"] != req.origin or card["destination"] != req.destination:
+            if card["origin"] not in valid_origins or card["destination"] not in valid_dests:
                 continue
             if card["price"] <= 0:
                 continue
@@ -217,3 +232,24 @@ class VietnamAirlinesConnectorClient:
             ))
 
         return offers
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_viet_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

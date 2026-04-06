@@ -26,13 +26,14 @@ from typing import Any, Optional
 
 import httpx
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import get_httpx_proxy_url
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ class BimanConnectorClient:
                 timeout=self.timeout,
                 headers=_HEADERS,
                 follow_redirects=True,
-            )
+                proxy=get_httpx_proxy_url(),)
         return self._http
 
     async def close(self):
@@ -78,6 +79,17 @@ class BimanConnectorClient:
             await self._http.aclose()
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         client = await self._client()
 
@@ -192,8 +204,14 @@ class BimanConnectorClient:
                 brand_labels[bid] = bid
 
         # unbundledOffers: list of groups (one per itinerary direction).
-        # Each group is a list of brand offers with segments and pricing.
-        for group in data.get("unbundledOffers", []):
+        # RT: group[0] = outbound, group[1] = inbound. OW: single group.
+        all_groups = data.get("unbundledOffers", [])
+        is_rt = req.return_from is not None and len(all_groups) >= 2
+
+        ob_offers: list[FlightOffer] = []
+        ib_offers: list[FlightOffer] = []
+
+        for g_idx, group in enumerate(all_groups):
             if not isinstance(group, list):
                 group = [group]
             for uo in group:
@@ -230,6 +248,40 @@ class BimanConnectorClient:
                     source="biman_direct",
                     source_tier="free",
                 ))
+
+                # Bucket into OB or IB list
+                if is_rt and g_idx == 1:
+                    ib_offers.append(offers[-1])
+                else:
+                    ob_offers.append(offers[-1])
+
+        # RT: cross-multiply OB × IB to build combined RT offers
+        if is_rt and ib_offers:
+            rt_offers: list[FlightOffer] = []
+            for ob in ob_offers[:15]:
+                for ib in ib_offers[:10]:
+                    combined = round(ob.price + ib.price, 2)
+                    rt_id = hashlib.md5(f"bg_rt_{ob.id}_{ib.id}".encode()).hexdigest()[:12]
+                    bk = self._booking_url(req)
+                    if req.return_from:
+                        bk += f"&returnDate={req.return_from.strftime('%Y-%m-%d')}"
+                    rt_offers.append(FlightOffer(
+                        id=f"bg_rt_{rt_id}",
+                        price=combined,
+                        currency=ob.currency,
+                        price_formatted=f"{combined:.2f} {ob.currency}",
+                        outbound=ob.outbound,
+                        inbound=ib.outbound,
+                        airlines=list(set(ob.airlines + ib.airlines)),
+                        owner_airline="BG",
+                        booking_url=bk,
+                        is_locked=False,
+                        source="biman_direct",
+                        source_tier="free",
+                    ))
+            if rt_offers:
+                rt_offers.sort(key=lambda o: o.price)
+                offers = rt_offers[:50]
 
         # If no unbundled offers, fall back to brandedResults
         if not offers:
@@ -391,3 +443,24 @@ class BimanConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_bima_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

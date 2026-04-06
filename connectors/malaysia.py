@@ -20,13 +20,14 @@ from typing import Optional
 
 import httpx
 
-from models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
     FlightSearchResponse,
     FlightSegment,
 )
+from .browser import get_httpx_proxy_url
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ class MalaysiaConnectorClient:
                 timeout=self.timeout,
                 follow_redirects=True,
                 headers=_HEADERS,
-            )
+                proxy=get_httpx_proxy_url(),)
         return self._http
 
     async def close(self) -> None:
@@ -77,6 +78,19 @@ class MalaysiaConnectorClient:
     # ── Public API ───────────────────────────────────────────────────────────
 
     async def search_flights(
+        self, req: FlightSearchRequest
+    ) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(
         self, req: FlightSearchRequest
     ) -> FlightSearchResponse:
         t0 = time.monotonic()
@@ -119,17 +133,46 @@ class MalaysiaConnectorClient:
             stopovers=0,
         )
 
-        offer_id = self._make_id(req, price)
+        # RT: fetch return leg low fare
+        _ib_route = None
+        _ib_price = 0.0
+        if req.return_from:
+            from copy import copy
+            ib_req = copy(req)
+            ib_req.origin = req.destination
+            ib_req.destination = req.origin
+            ib_req.date_from = req.return_from
+            ib_fare = await self._fetch_low_fare(client, ib_req)
+            if ib_fare:
+                _ib_price = float(ib_fare["totalFareAmount"])
+                ib_dt = datetime.combine(req.return_from, datetime.min.time())
+                ib_seg = FlightSegment(
+                    airline="MH", airline_name="Malaysia Airlines", flight_no="",
+                    origin=req.destination, destination=req.origin,
+                    departure=ib_dt, arrival=ib_dt,
+                    duration_seconds=0, cabin_class=cabin,
+                )
+                _ib_route = FlightRoute(segments=[ib_seg], total_duration_seconds=0, stopovers=0)
+
+        total_price = round(price + _ib_price, 2) if _ib_route else price
+        offer_id = self._make_id(req, total_price)
+        id_val = f"mh_rt_{offer_id[3:]}" if _ib_route else offer_id
+
+        bk_url = booking_url
+        if _ib_route:
+            bk_url = self._fallback_booking_url(req).replace("isOneWay=true", "isOneWay=false")
+            bk_url += f"&dateReturn={req.return_from.strftime('%Y-%m-%d')}"
+
         offer = FlightOffer(
-            id=offer_id,
-            price=price,
+            id=id_val,
+            price=total_price,
             currency=currency,
-            price_formatted=f"{price:.2f} {currency}",
+            price_formatted=f"{total_price:.2f} {currency}",
             outbound=route,
-            inbound=None,
+            inbound=_ib_route,
             airlines=["Malaysia Airlines"],
             owner_airline="MH",
-            booking_url=booking_url,
+            booking_url=bk_url,
             is_locked=False,
             source="malaysia_direct",
             source_tier="free",
@@ -142,7 +185,7 @@ class MalaysiaConnectorClient:
         )
 
         search_hash = hashlib.md5(
-            f"malaysia{req.origin}{req.destination}{req.date_from}".encode()
+            f"malaysia{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
 
         return FlightSearchResponse(
@@ -276,7 +319,7 @@ class MalaysiaConnectorClient:
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         search_hash = hashlib.md5(
-            f"malaysia{req.origin}{req.destination}{req.date_from}".encode()
+            f"malaysia{req.origin}{req.destination}{req.date_from}{req.return_from or ''}".encode()
         ).hexdigest()[:12]
         return FlightSearchResponse(
             search_id=f"fs_{search_hash}",
@@ -286,3 +329,24 @@ class MalaysiaConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_mala_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

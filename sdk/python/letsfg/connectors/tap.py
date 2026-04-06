@@ -119,6 +119,17 @@ class TapConnectorClient:
             await self._http.aclose()
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
 
         # Primary: Sputnik grouped-routes API
@@ -141,7 +152,21 @@ class TapConnectorClient:
                 if html:
                     fares = self._extract_fares(html)
                     if fares:
-                        offers = self._build_offers(fares, req)
+                        # RT: fetch reverse route page for IB fares
+                        ib_fares: list[dict] = []
+                        if req.return_from:
+                            ib_url = f"{_BASE}/flights/en-pt/flights-from-{dest_slug}-to-{origin_slug}"
+                            logger.info("TAP: fetching IB fares %s", ib_url)
+                            try:
+                                ib_html = await asyncio.get_event_loop().run_in_executor(
+                                    None, self._fetch_sync, ib_url
+                                )
+                            except Exception as ibe:
+                                logger.warning("TAP IB fetch error: %s", ibe)
+                                ib_html = None
+                            if ib_html:
+                                ib_fares = self._extract_fares(ib_html)
+                        offers = self._build_offers(fares, req, ib_fares=ib_fares)
 
         if not offers:
             offers = []
@@ -279,7 +304,7 @@ class TapConnectorClient:
                     inbound=inbound,
                     airlines=["TAP Air Portugal"],
                     owner_airline="TP",
-                    booking_url=f"{_BASE}/en-us/booking?origin={orig}&destination={dest}&date={dep_str}&adults={req.adults or 1}&type=OW",
+                    booking_url=f"{_BASE}/booking/flights",
                     is_locked=False,
                     source="tap_direct",
                     source_tier="free",
@@ -341,8 +366,9 @@ class TapConnectorClient:
                     all_fares.append(f)
         return all_fares
 
-    def _build_offers(self, fares: list[dict], req: FlightSearchRequest) -> list[FlightOffer]:
+    def _build_offers(self, fares: list[dict], req: FlightSearchRequest, *, ib_fares: list[dict] | None = None) -> list[FlightOffer]:
         target_date = req.date_from.strftime("%Y-%m-%d")
+        ret_date = req.return_from.strftime("%Y-%m-%d") if req.return_from else None
         offers: list[FlightOffer] = []
 
         # City-aware matching: LON matches LHR, LGW, STN, etc.
@@ -406,8 +432,43 @@ class TapConnectorClient:
             )
             route = FlightRoute(segments=[seg], total_duration_seconds=0, stopovers=0)
 
+            # ── IB route from reverse-page fares ──
+            _ib_route = None
+            _ib_price = 0.0
+            if ret_date and ib_fares:
+                best_ib = None
+                best_ib_exact = None
+                for ibf in ib_fares:
+                    ibp = ibf.get("totalPrice")
+                    if not ibp or float(ibp) <= 0:
+                        continue
+                    ib_dep = (ibf.get("departureDate") or "")[:10]
+                    if ib_dep == ret_date:
+                        if best_ib_exact is None or float(ibp) < float(best_ib_exact.get("totalPrice", 9e9)):
+                            best_ib_exact = ibf
+                    if best_ib is None or float(ibp) < float(best_ib.get("totalPrice", 9e9)):
+                        best_ib = ibf
+                chosen_ib = best_ib_exact or best_ib
+                if chosen_ib:
+                    _ib_price = round(float(chosen_ib["totalPrice"]), 2)
+                    ib_dep_str = (chosen_ib.get("departureDate") or ret_date)[:10]
+                    try:
+                        ib_dt = datetime.strptime(ib_dep_str, "%Y-%m-%d")
+                    except ValueError:
+                        ib_dt = datetime(2000, 1, 1)
+                    ib_seg = FlightSegment(
+                        airline="TP", airline_name="TAP Air Portugal", flight_no="",
+                        origin=req.destination, destination=req.origin,
+                        departure=ib_dt, arrival=ib_dt,
+                        duration_seconds=0, cabin_class=cabin,
+                    )
+                    _ib_route = FlightRoute(segments=[ib_seg], total_duration_seconds=0, stopovers=0)
+
+            total_price = round(price_f + _ib_price, 2) if _ib_route else price_f
+            id_prefix = "tp_rt_" if _ib_route else "tp_"
+
             fid = hashlib.md5(
-                f"tp_{orig}{dest}{dep_date}{price_f}{cabin}".encode()
+                f"tp_{orig}{dest}{dep_date}{total_price}{cabin}{ret_date or ''}".encode()
             ).hexdigest()[:12]
 
             is_exact_date = dep_date[:10] == target_date
@@ -416,21 +477,27 @@ class TapConnectorClient:
                 conditions["price_type"] = "nearby_date"
                 conditions["fare_date"] = dep_date[:10]
 
+            bk_url = (
+                f"https://www.flytap.com/en-us/booking"
+                f"?origin={req.origin}&destination={req.destination}"
+                f"&date={target_date}&adults={req.adults or 1}"
+            )
+            if _ib_route and ret_date:
+                bk_url += f"&type=RT&return={ret_date}"
+            else:
+                bk_url += "&type=OW"
+
             offers.append(FlightOffer(
-                id=f"tp_{fid}",
-                price=price_f,
+                id=f"{id_prefix}{fid}",
+                price=total_price,
                 currency=currency,
-                price_formatted=fare.get("formattedTotalPrice") or f"{price_f:.2f} {currency}",
+                price_formatted=f"{total_price:.2f} {currency}",
                 outbound=route,
-                inbound=None,
+                inbound=_ib_route,
                 airlines=["TAP Air Portugal"],
                 owner_airline="TP",
                 conditions=conditions,
-                booking_url=(
-                    f"https://www.flytap.com/en-us/booking"
-                    f"?origin={req.origin}&destination={req.destination}"
-                    f"&date={target_date}&adults={req.adults or 1}&type=OW"
-                ),
+                booking_url=bk_url,
                 is_locked=False,
                 source="tap_direct",
                 source_tier="free",
@@ -448,3 +515,24 @@ class TapConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_tap_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

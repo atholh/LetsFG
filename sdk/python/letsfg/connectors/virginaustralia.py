@@ -85,6 +85,17 @@ class VirginAustraliaConnectorClient:
         return self._feed_cache
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         t0 = time.monotonic()
         offers: list[FlightOffer] = []
 
@@ -116,6 +127,7 @@ class VirginAustraliaConnectorClient:
     def _parse(self, feed: dict, req: FlightSearchRequest) -> list[FlightOffer]:
         offers: list[FlightOffer] = []
         target_ts = int(datetime.combine(req.date_from, datetime.min.time()).timestamp())
+        ret_ts = int(datetime.combine(req.return_from, datetime.min.time()).timestamp()) if req.return_from else 0
         valid_origins = city_match_set(req.origin)
         valid_dests = city_match_set(req.destination)
 
@@ -152,6 +164,43 @@ class VirginAustraliaConnectorClient:
             if best_price is None or best_price <= 0:
                 continue
 
+            # RT: look up reverse route in same feed
+            _ib_route = None
+            _ib_price = 0.0
+            if req.return_from:
+                dest_data = feed.get(req.destination.lower())
+                if dest_data and isinstance(dest_data, dict):
+                    for ib_item in dest_data.get("sale_items", []):
+                        if ib_item.get("destination", "").upper() not in valid_origins:
+                            continue
+                        if ib_item.get("origin", "").upper() not in valid_dests:
+                            continue
+                        ib_best = None
+                        for tp in ib_item.get("travel_periods", []):
+                            start = tp.get("start_date", 0)
+                            end = tp.get("end_date", 0)
+                            if start <= ret_ts <= end:
+                                tp_price = tp.get("from_price", 0)
+                                if tp_price > 0 and (ib_best is None or tp_price < ib_best):
+                                    ib_best = tp_price
+                        if ib_best is None:
+                            dp = ib_item.get("display_price") or ib_item.get("from_price") or 0
+                            if dp > 0:
+                                ib_best = dp
+                        if ib_best and ib_best > 0:
+                            _ib_price = float(ib_best)
+                            ib_dt = datetime.combine(req.return_from, datetime.min.time().replace(hour=8))
+                            ib_seg = FlightSegment(
+                                airline="VA", airline_name="Virgin Australia", flight_no="VA",
+                                origin=req.destination, destination=req.origin,
+                                departure=ib_dt, arrival=ib_dt,
+                            )
+                            _ib_route = FlightRoute(segments=[ib_seg], total_duration_seconds=0, stopovers=0)
+                            break  # take first matching reverse route
+
+            total_price = round(float(best_price) + _ib_price, 2) if _ib_route else round(float(best_price), 2)
+            id_prefix = "va_rt_" if _ib_route else "va_"
+
             cabin = item.get("cabin", "Economy")
             dep_dt = datetime.combine(req.date_from, datetime.min.time().replace(hour=8))
 
@@ -166,24 +215,26 @@ class VirginAustraliaConnectorClient:
             )
             route = FlightRoute(segments=[seg], total_duration_seconds=0, stopovers=0)
 
-            booking_url = item.get("url") or (
+            bk_url = item.get("url") or (
                 f"https://www.virginaustralia.com/au/en/booking/flights/search/"
                 f"?origin={req.origin}&destination={req.destination}"
                 f"&date={req.date_from.strftime('%Y-%m-%d')}"
                 f"&adults={req.adults or 1}"
             )
+            if _ib_route and req.return_from:
+                bk_url += f"&returnDate={req.return_from.strftime('%Y-%m-%d')}"
 
-            key = f"va_{req.origin}{req.destination}{best_price}{best_brand}"
+            key = f"va_{req.origin}{req.destination}{total_price}{best_brand}{req.return_from or ''}"
             oid = hashlib.md5(key.encode()).hexdigest()[:12]
 
             offers.append(
                 FlightOffer(
-                    id=f"va_{oid}",
-                    price=round(float(best_price), 2),
+                    id=f"{id_prefix}{oid}",
+                    price=total_price,
                     currency="AUD",
-                    price_formatted=f"{best_price:.2f} AUD",
+                    price_formatted=f"{total_price:.2f} AUD",
                     outbound=route,
-                    inbound=None,
+                    inbound=_ib_route,
                     airlines=["Virgin Australia"],
                     owner_airline="VA",
                     conditions={
@@ -192,7 +243,7 @@ class VirginAustraliaConnectorClient:
                         "price_type": "sale_fare",
                         "connection": item.get("connection", ""),
                     },
-                    booking_url=booking_url,
+                    booking_url=bk_url,
                     is_locked=False,
                     source="virginaustralia_direct",
                     source_tier="free",
@@ -200,3 +251,24 @@ class VirginAustraliaConnectorClient:
             )
 
         return offers
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_virg_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

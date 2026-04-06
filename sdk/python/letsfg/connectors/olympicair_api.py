@@ -51,11 +51,22 @@ class OlympicAirConnectorClient:
         pass
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         started = time.monotonic()
 
         try:
             payload = await asyncio.get_event_loop().run_in_executor(
-                None, self._fetch_month_sync, req.origin, req.destination, req.date_from
+                None, self._fetch_month_sync, req.origin, req.destination, req.date_from, req.return_from
             )
         except Exception as exc:
             logger.warning("Olympic Air fetch failed for %s->%s: %s", req.origin, req.destination, exc)
@@ -83,16 +94,21 @@ class OlympicAirConnectorClient:
             total_results=len(offers),
         )
 
-    def _fetch_month_sync(self, origin: str, destination: str, date_from: date | datetime) -> dict:
+    def _fetch_month_sync(self, origin: str, destination: str, date_from: date | datetime, return_from: date | datetime | None = None) -> dict:
         search_date = _as_date(date_from)
         month_value = f"{search_date.year}-{search_date.month}"
+        trip_type = "RT" if return_from else "OW"
+        ret_month = ""
+        if return_from:
+            ret_date = _as_date(return_from)
+            ret_month = f"{ret_date.year}-{ret_date.month}"
         url = (
             f"{_BASE}/en/sys/lowfares/RouteLowFares/"
             f"?DepartureAirport={origin}"
             f"&ArrivalAirport={destination}"
-            f"&TripType={'RT' if req.return_from else 'OW'}"
+            f"&TripType={trip_type}"
             f"&DepartureDate={month_value}"
-            f"&ReturnDate={month_value}"
+            f"&ReturnDate={ret_month or month_value}"
             f"&SelectedDepartureDate="
             f"&SelectedReturnDate="
             f"&Type=Fares"
@@ -105,15 +121,77 @@ class OlympicAirConnectorClient:
 
     def _build_offers(self, payload: dict, req: FlightSearchRequest) -> list[FlightOffer]:
         outbound = payload.get("Outbound") or []
+        inbound_raw = payload.get("Inbound") or payload.get("Return") or []
         search_date = _as_date(req.date_from)
+
+        # Build cheapest IB route if RT
+        _ib_route: FlightRoute | None = None
+        _ib_price = 0.0
+        if req.return_from and inbound_raw:
+            ret_date = _as_date(req.return_from)
+            best_ib_price = float("inf")
+            best_ib_item = None
+            for ib_item in inbound_raw:
+                ib_dep = self._parse_oa_date(ib_item.get("Date", ""))
+                if ib_dep is None:
+                    continue
+                ib_p = ib_item.get("FullPrice") or ib_item.get("Price")
+                if ib_p is None:
+                    continue
+                try:
+                    ib_pf = float(ib_p)
+                except (TypeError, ValueError):
+                    continue
+                if ib_pf <= 0:
+                    continue
+                # Prefer exact return date match
+                if ib_dep.date() == ret_date and ib_pf < best_ib_price:
+                    best_ib_price = ib_pf
+                    best_ib_item = ib_item
+            # Fallback: cheapest overall IB
+            if best_ib_item is None:
+                for ib_item in inbound_raw:
+                    ib_dep = self._parse_oa_date(ib_item.get("Date", ""))
+                    if ib_dep is None:
+                        continue
+                    ib_p = ib_item.get("FullPrice") or ib_item.get("Price")
+                    if ib_p is None:
+                        continue
+                    try:
+                        ib_pf = float(ib_p)
+                    except (TypeError, ValueError):
+                        continue
+                    if ib_pf <= 0:
+                        continue
+                    if ib_pf < best_ib_price:
+                        best_ib_price = ib_pf
+                        best_ib_item = ib_item
+            if best_ib_item and best_ib_price < float("inf"):
+                _ib_price = round(best_ib_price, 2)
+                ib_dep_dt = self._parse_oa_date(best_ib_item.get("Date", "")) or datetime(2000, 1, 1)
+                _ib_route = FlightRoute(
+                    segments=[FlightSegment(
+                        airline="OA", airline_name="Olympic Air", flight_no="",
+                        origin=req.destination, destination=req.origin,
+                        departure=ib_dep_dt, arrival=ib_dep_dt,
+                        duration_seconds=0, cabin_class="economy",
+                    )],
+                    total_duration_seconds=0, stopovers=0,
+                )
+
+        is_rt = _ib_route is not None
+        travel_type = "R" if is_rt else "O"
         booking_url = (
             f"{_BASE}/en/flight-deals/low-fare-calendar/"
-            f"?TravelType=O"
+            f"?TravelType={travel_type}"
             f"&AirportFrom={req.origin}"
             f"&AirportTo={req.destination}"
             f"&MonthFrom={search_date.year}-{search_date.month}"
             f"&SelectedDepartureDate={search_date.strftime('%Y-%m-%d')}"
         )
+        if is_rt and req.return_from:
+            ret_date = _as_date(req.return_from)
+            booking_url += f"&MonthTo={ret_date.year}-{ret_date.month}&SelectedReturnDate={ret_date.strftime('%Y-%m-%d')}"
 
         offers: list[FlightOffer] = []
         for item in outbound:
@@ -127,6 +205,8 @@ class OlympicAirConnectorClient:
 
             cabin = (item.get("Class") or "Economy").lower()
             price_value = round(float(price), 2)
+            total_price = round(price_value + _ib_price, 2) if is_rt else price_value
+            prefix = "oa_rt_" if is_rt else "oa_"
             segment = FlightSegment(
                 airline="OA",
                 airline_name="Olympic Air",
@@ -142,16 +222,16 @@ class OlympicAirConnectorClient:
             )
             route = FlightRoute(segments=[segment], total_duration_seconds=0, stopovers=0)
             offer_hash = hashlib.md5(
-                f"oa_{req.origin}{req.destination}{departure.date().isoformat()}{price_value}{cabin}".encode()
+                f"oa_{req.origin}{req.destination}{departure.date().isoformat()}{total_price}{cabin}".encode()
             ).hexdigest()[:12]
             offers.append(
                 FlightOffer(
-                    id=f"oa_{offer_hash}",
-                    price=price_value,
+                    id=f"{prefix}{offer_hash}",
+                    price=total_price,
                     currency="EUR",
-                    price_formatted=f"EUR {price_value:.2f}",
+                    price_formatted=f"EUR {total_price:.2f}",
                     outbound=route,
-                    inbound=None,
+                    inbound=_ib_route,
                     airlines=["Olympic Air"],
                     owner_airline="OA",
                     booking_url=booking_url,
@@ -183,3 +263,23 @@ class OlympicAirConnectorClient:
             offers=[],
             total_results=0,
         )
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_olym_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]
