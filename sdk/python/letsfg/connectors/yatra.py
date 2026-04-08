@@ -1,15 +1,15 @@
-"""
-Yatra connector — India's OTA (CDP Chrome + deep-link + API interception).
+"""Yatra connector - India's OTA (CDP Chrome + Akamai warmup + fetch API).
 
 Yatra.com is one of India's largest OTAs. Strong on domestic Indian routes
 and India-international connections. Has competitive fares from consolidator
 arrangements with Indian carriers.
 
-Strategy (CDP Chrome + deep-link + API interception):
-1. Launch real Chrome via --remote-debugging-port (bypasses PerimeterX).
-2. Navigate directly to Yatra search results URL (deep-link).
-3. Intercept flight.yatra.com/air-search-ui API responses.
-4. Also try extracting window.Search_.Populator.resData global.
+Strategy:
+1. Launch real Chrome via --remote-debugging-port (bypasses Akamai).
+2. Warm up Akamai on flight.yatra.com (solve challenge once).
+3. Navigate to fbdom_flight/trigger (domestic) or int_one_way/trigger (intl).
+4. Call /air-service/dom|int/search via page.evaluate(fetch()) reusing Akamai cookies.
+5. Parse merged resultData batches (fltSchedule + fareDetails join).
 """
 
 from __future__ import annotations
@@ -42,6 +42,14 @@ _CDP_PORT = 9469
 _USER_DATA_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".yatra_chrome_data"
 )
+
+# Major Indian airports for domestic/international endpoint selection
+_INDIA_AIRPORTS = {
+    "DEL", "BOM", "BLR", "MAA", "CCU", "HYD", "AMD", "COK", "GOI", "PNQ",
+    "JAI", "LKO", "PAT", "GAU", "IXC", "SXR", "VNS", "IXB", "BBI", "RPR",
+    "NAG", "IDR", "VTZ", "IXR", "RAJ", "TRZ", "CJB", "UDR", "JDH", "IXA",
+    "IMF", "DIB", "DED", "AIP", "IXE", "IXM", "KLH", "BDQ", "STV", "AGR",
+}
 
 _pw_instance = None
 _browser = None
@@ -137,13 +145,20 @@ async def _get_browser():
         ]
         _chrome_proc = subprocess.Popen(args, **stealth_popen_kwargs())
         _launched_procs.append(_chrome_proc)
-        await asyncio.sleep(2.0)
 
+        # Wait for Chrome to be ready on CDP port (cold start can take >2s)
         pw = await async_playwright().start()
         _pw_instance = pw
-        _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_CDP_PORT}")
-        logger.info("Yatra: Chrome launched on CDP port %d (pid %d)", _CDP_PORT, _chrome_proc.pid)
-        return _browser
+        for _attempt in range(6):
+            await asyncio.sleep(2.0)
+            try:
+                _browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{_CDP_PORT}")
+                logger.info("Yatra: Chrome launched on CDP port %d (pid %d, attempt %d)", _CDP_PORT, _chrome_proc.pid, _attempt)
+                return _browser
+            except Exception:
+                if _attempt == 5:
+                    raise
+        raise RuntimeError(f"Chrome failed to start on port {_CDP_PORT}")
 
 
 async def _dismiss_cookies(page) -> None:
@@ -159,9 +174,9 @@ async def _dismiss_cookies(page) -> None:
 
 
 class YatraConnectorClient:
-    """Yatra — India's OTA, CDP Chrome + deep-link + API interception."""
+    """Yatra — India's OTA, CDP Chrome + Akamai warmup + fetch API."""
 
-    def __init__(self, timeout: float = 55.0):
+    def __init__(self, timeout: float = 70.0):
         self.timeout = timeout
 
     async def close(self):
@@ -181,42 +196,143 @@ class YatraConnectorClient:
 
         async def _on_response(response):
             url = response.url.lower()
-            if response.status == 200 and any(kw in url for kw in ("air-search", "flight", "fbdom", "fbint", "result")):
-                ct = response.headers.get("content-type", "")
-                if "json" in ct or "javascript" in ct:
-                    try:
-                        data = await response.json()
-                        if isinstance(data, (dict, list)):
-                            captured.append(data if isinstance(data, dict) else {"results": data})
-                    except Exception:
-                        try:
-                            text = await response.text()
-                            jsonp_match = re.search(r'^\w+\((.*)\);?$', text.strip(), re.S)
-                            if jsonp_match:
-                                data = json.loads(jsonp_match.group(1))
-                                captured.append(data if isinstance(data, dict) else {"results": data})
-                        except Exception:
-                            pass
+            ct = response.headers.get("content-type", "")
+            is_search_api = any(kw in url for kw in (
+                "air-search", "fbdom", "fbint", "getfares", "lowest-fare",
+                "flightlist", "searchajax", "populat", "domresult", "intresult",
+            ))
+            is_flight_json = ("flight.yatra.com" in url and ("json" in ct or "javascript" in ct))
+            if response.status == 200 and (is_search_api or is_flight_json):
+                try:
+                    data = await response.json()
+                    if isinstance(data, (dict, list)):
+                        captured.append(data if isinstance(data, dict) else {"results": data})
+                except Exception:
+                    pass
 
         page.on("response", _on_response)
 
         try:
-            # Deep-link to Yatra search results
-            trip_type = 'R' if req.return_from else 'O'
-            search_url = f"{_BASE}/flights/search?type={trip_type}&ADT={req.adults or 1}&CNN=0&INF=0&origin={req.origin}&destination={req.destination}&flight_depart_date={date_yatra}&class=Economy"
-            if req.return_from:
-                ret_yatra = req.return_from.strftime('%d/%m/%Y') if hasattr(req.return_from, 'strftime') else str(req.return_from)
-                search_url += f"&flight_return_date={ret_yatra}"
-            logger.info("Yatra: navigating to %s", search_url)
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=int(self.timeout * 1000))
+            is_domestic = (req.origin in _INDIA_AIRPORTS and req.destination in _INDIA_AIRPORTS)
+            date_encoded = date_yatra.replace("/", "%2F")  # URL-safe DD%2FMM%2FYYYY
+
+            # Step 1: Warm up Akamai on flight.yatra.com
+            logger.info("Yatra: warming up Akamai (%s->%s, domestic=%s)", req.origin, req.destination, is_domestic)
+            await page.goto("https://flight.yatra.com/air-search-ui/", wait_until="domcontentloaded", timeout=30000)
+            for w in range(15):
+                await asyncio.sleep(2.0)
+                try:
+                    t = await page.title()
+                    if "challenge" not in t.lower() and "validation" not in t.lower():
+                        logger.info("Yatra: Akamai solved in %ds", (w + 1) * 2)
+                        break
+                except Exception:
+                    pass
+            await asyncio.sleep(1.0)
+
+            # Step 2: Navigate to trigger page — try fbdom_flight (domestic) or int_one_way (intl)
+            if is_domestic:
+                trigger_url = (
+                    f"https://flight.yatra.com/air-search-ui/fbdom_flight/trigger?"
+                    f"ADT={req.adults or 1}&CNN=0&INF=0"
+                    f"&origin={req.origin}&destination={req.destination}"
+                    f"&flight_depart_date={date_encoded}&type=O"
+                    f"&viewName=normal&flexi=N&class=Economy"
+                )
+            else:
+                trigger_url = (
+                    f"https://flight.yatra.com/air-search-ui/int_one_way/trigger?"
+                    f"ADT={req.adults or 1}&CNN=0&INF=0"
+                    f"&origin={req.origin}&destination={req.destination}"
+                    f"&flight_depart_date={date_encoded}&type=O"
+                    f"&viewName=normal&flexi=N&class=Economy"
+                )
+
+            logger.info("Yatra: navigating to trigger (domestic=%s)", is_domestic)
+            await page.goto(trigger_url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(3.0)
 
-            # Check for GDPR block (Yatra blocks EU traffic)
-            if "/gdpr" in page.url.lower() or "temporarily unavailable" in (await page.title()).lower():
-                logger.warning("Yatra: GDPR block — site unavailable from this region")
+            # Wait for any secondary Akamai challenge on trigger page
+            try:
+                title = await page.title()
+            except Exception:
+                title = ""
+            if "challenge" in title.lower() or "validation" in title.lower():
+                logger.info("Yatra: Akamai challenge on trigger page, waiting...")
+                for w2 in range(20):
+                    await asyncio.sleep(2.0)
+                    try:
+                        title = await page.title()
+                        if "challenge" not in title.lower() and "validation" not in title.lower():
+                            logger.info("Yatra: trigger challenge solved in %ds", (w2 + 1) * 2)
+                            break
+                    except Exception:
+                        pass  # context destroyed during navigation — expected
+                # After challenge, page may have navigated — wait for load
+                await asyncio.sleep(2.0)
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                except Exception:
+                    pass
+                try:
+                    title = await page.title()
+                except Exception:
+                    title = ""
+
+            cur_url = page.url
+            if "/gdpr" in cur_url.lower():
+                logger.warning("Yatra: GDPR block")
                 return self._empty(req)
 
+            logger.info("Yatra: trigger loaded: %s (title=%s)", cur_url[:120], title[:60])
+
             await _dismiss_cookies(page)
+
+            # Step 3: Call /air-service/dom/search API directly from the page context
+            # (Akamai cookies from steps 1+2 make this work)
+            api_scope = "dom" if is_domestic else "int"
+            search_params = (
+                f"ADT={req.adults or 1}&CHD=0&CNN=0&INF=0"
+                f"&origin={req.origin}&destination={req.destination}"
+                f"&flight_depart_date={date_yatra}&type=O"
+                f"&viewName=normal&flexi=N&class=Economy"
+            )
+
+            fetch_js = f"""async () => {{
+                const paths = ['/air-service/{api_scope}/search', '/air-service/{api_scope}/trigger'];
+                let best = null;
+                for (const path of paths) {{
+                    try {{
+                        const r = await fetch(path + '?{search_params}');
+                        if (r.status === 200) {{
+                            const text = await r.text();
+                            if (text.length > 1000 && (!best || text.length > best.length)) {{
+                                best = text;
+                            }}
+                        }}
+                    }} catch(e) {{}}
+                }}
+                return best;
+            }}"""
+
+            try:
+                raw = await page.evaluate(fetch_js)
+                if raw:
+                    search_data = json.loads(raw)
+                    logger.info("Yatra: search API returned %d bytes", len(raw))
+                    captured.append(search_data)
+            except Exception as e:
+                logger.info("Yatra: search API error: %s — retrying after 3s", str(e)[:80])
+                await asyncio.sleep(3.0)
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    raw = await page.evaluate(fetch_js)
+                    if raw:
+                        search_data = json.loads(raw)
+                        logger.info("Yatra: search API retry returned %d bytes", len(raw))
+                        captured.append(search_data)
+                except Exception as e2:
+                    logger.info("Yatra: search API retry also failed: %s", str(e2)[:80])
 
             # Polling loop: wait for API or window data
             remaining = max(self.timeout - (time.monotonic() - t0), 15)
@@ -272,136 +388,138 @@ class YatraConnectorClient:
                 pass
 
     def _parse(self, data: dict, req: FlightSearchRequest, date_str: str) -> list[FlightOffer]:
-        """Parse Yatra flight results."""
+        """Parse Yatra flight results from /air-service/dom/search or /trigger response.
+
+        Structure:
+          resultData[0]:
+            fltSchedule:
+              {routeKey}: [{ID, OD: [{tdu, FS: [{ac, fl, dac, aac, ddt, adt, dd, ad, du, dum, ...}]}]}]
+              airlineNames: {ac: name}
+            fareDetails:
+              {routeKey}:
+                {flightID}:
+                  O:
+                    ADT: {bf: baseFare, tf: totalFare}
+        """
         offers: list[FlightOffer] = []
-        is_rt = bool(req.return_from)
 
-        results = (
-            data.get("flightList") or data.get("flights") or data.get("itineraries")
-            or data.get("result") or data.get("results")
-            or data.get("OB") or data.get("outbound")
-            or (data.get("data", {}).get("flightList") if isinstance(data.get("data"), dict) else None)
-            or []
-        )
+        # Navigate to resultData — may have multiple batches
+        rd_list = data.get("resultData")
+        if not rd_list or not isinstance(rd_list, list):
+            return offers
 
-        if isinstance(results, dict):
-            results = results.get("items") or results.get("list") or list(results.values())
+        # Merge fltSchedule and fareDetails across ALL resultData entries
+        all_sched: dict = {}
+        all_fares: dict = {}
+        airline_names: dict = {}
+        for rd in rd_list:
+            if not isinstance(rd, dict):
+                continue
+            sched = rd.get("fltSchedule")
+            if isinstance(sched, dict):
+                if sched.get("airlineNames"):
+                    airline_names.update(sched["airlineNames"])
+                for k, v in sched.items():
+                    if isinstance(v, list) and v and isinstance(v[0], dict) and "OD" in v[0]:
+                        all_sched.setdefault(k, []).extend(v)
+            for fk in ("fareDetails", "fareDetailsSR"):
+                fd = rd.get(fk)
+                if isinstance(fd, dict):
+                    for rk, rv in fd.items():
+                        if isinstance(rv, dict):
+                            all_fares.setdefault(rk, {}).update(rv)
 
-        # Parse inbound flights for RT
-        ib_route: Optional[FlightRoute] = None
-        ib_price = 0.0
-        if is_rt:
-            ib_results = (
-                data.get("IB") or data.get("inbound") or data.get("returnFlightList")
-                or data.get("returnFlights") or []
-            )
-            if isinstance(ib_results, dict):
-                ib_results = ib_results.get("items") or ib_results.get("list") or list(ib_results.values())
-            if isinstance(ib_results, list) and ib_results:
-                best_ib_price = float("inf")
-                for ib_item in ib_results[:20]:
-                    try:
-                        p = 0.0
-                        for pk in ("totalFare", "fare", "price", "totalPrice", "amt", "amount", "netFare"):
-                            v = ib_item.get(pk)
-                            if v and float(v) > 0:
-                                p = float(v)
-                                break
-                        if isinstance(ib_item.get("pricingSummary"), dict):
-                            p = float(ib_item["pricingSummary"].get("totalFare") or ib_item["pricingSummary"].get("total") or 0) or p
-                        if 0 < p < best_ib_price:
-                            best_ib_price = p
-                            ib_segs = ib_item.get("flightSegments") or ib_item.get("segments") or ib_item.get("legs") or [ib_item]
-                            ib_segments: list[FlightSegment] = []
-                            for seg in (ib_segs if isinstance(ib_segs, list) else [ib_segs]):
-                                carrier = seg.get("airlineCode") or seg.get("airline") or seg.get("carrier") or ""
-                                carrier_name = seg.get("airlineName") or seg.get("alName") or carrier
-                                fno = seg.get("flightNo") or seg.get("flightNumber") or ""
-                                dep_dt = _parse_dt(seg.get("departureDateTime") or seg.get("departure") or seg.get("depTime") or "")
-                                arr_dt = _parse_dt(seg.get("arrivalDateTime") or seg.get("arrival") or seg.get("arrTime") or "")
-                                ib_segments.append(FlightSegment(
-                                    airline=carrier_name, flight_no=f"{carrier}{fno}",
-                                    origin=seg.get("origin") or seg.get("departureAirport") or req.destination,
-                                    destination=seg.get("destination") or seg.get("arrivalAirport") or req.origin,
-                                    departure=dep_dt, arrival=arr_dt,
-                                    duration_seconds=int(seg.get("duration") or seg.get("eft") or 0) * 60,
-                                ))
-                            if ib_segments:
-                                ib_dur = sum(s.duration_seconds for s in ib_segments)
-                                ib_route = FlightRoute(segments=ib_segments, total_duration_seconds=ib_dur, stopovers=max(0, len(ib_segments) - 1))
-                                ib_price = best_ib_price
-                    except Exception:
-                        pass
+        if not all_sched:
+            return offers
 
-        for item in (results if isinstance(results, list) else [])[:30]:
-            try:
-                price = 0.0
-                for pk in ("totalFare", "fare", "price", "totalPrice", "amt", "amount", "netFare"):
-                    v = item.get(pk)
-                    if v and float(v) > 0:
-                        price = float(v)
-                        break
-                if isinstance(item.get("pricingSummary"), dict):
-                    price = float(item["pricingSummary"].get("totalFare") or item["pricingSummary"].get("total") or 0) or price
+        logger.debug("Yatra parse: %d batches, %d flights, %d fare keys, %d airlines",
+                      len(rd_list), sum(len(v) for v in all_sched.values()), len(all_fares), len(airline_names))
 
-                currency = item.get("currency") or item.get("currCode") or "INR"
-                if price <= 0:
-                    continue
+        # Iterate over all route keys and their flights
+        for route_key, flights in all_sched.items():
+            fare_map = all_fares.get(route_key, {})
 
-                seg_data = item.get("flightSegments") or item.get("segments") or item.get("legs") or item.get("flightLegs") or [item]
-                segments: list[FlightSegment] = []
+            for item in flights[:80]:
+                try:
+                    fid = item.get("ID", "")
+                    od_list = item.get("OD")
+                    if not od_list or not isinstance(od_list, list):
+                        continue
+                    od = od_list[0]
 
-                for seg in (seg_data if isinstance(seg_data, list) else [seg_data]):
-                    carrier = seg.get("airlineCode") or seg.get("airline") or seg.get("carrier") or seg.get("al") or ""
-                    carrier_name = seg.get("airlineName") or seg.get("alName") or carrier
-                    flight_no = seg.get("flightNo") or seg.get("flightNumber") or seg.get("fltNo") or ""
+                    # Get price from fareDetails using flight ID
+                    price = 0.0
+                    fare_entry = fare_map.get(fid, {})
+                    if isinstance(fare_entry, dict):
+                        ow = fare_entry.get("O", {})
+                        adt = ow.get("ADT", {})
+                        if isinstance(adt, dict):
+                            tf = adt.get("tf") or adt.get("TF") or adt.get("totalFare")
+                            if tf:
+                                price = float(tf)
 
-                    dep_airport = seg.get("origin") or seg.get("departureAirport") or seg.get("org") or req.origin
-                    arr_airport = seg.get("destination") or seg.get("arrivalAirport") or seg.get("dest") or req.destination
+                    if price <= 0:
+                        continue
 
-                    dep_dt = _parse_dt(
-                        seg.get("departureDateTime") or seg.get("departure") or seg.get("depTime")
-                        or seg.get("departTime")
+                    # Parse segments from FS array
+                    fs_list = od.get("FS", [])
+                    if not isinstance(fs_list, list) or not fs_list:
+                        continue
+
+                    segments: list[FlightSegment] = []
+                    for seg in fs_list:
+                        ac = seg.get("ac", "")
+                        carrier_name = airline_names.get(ac, ac)
+                        fl = seg.get("fl", "")
+                        dep_date = seg.get("ddt", "")
+                        arr_date = seg.get("adt", "")
+                        dep_time = seg.get("dd", "")  # "13:00"
+                        arr_time = seg.get("ad", "")  # "15:20"
+                        dep_dt = _parse_dt(f"{dep_date}T{dep_time}" if dep_date and dep_time else "")
+                        arr_dt = _parse_dt(f"{arr_date}T{arr_time}" if arr_date and arr_time else "")
+                        dur_min = int(seg.get("dum") or seg.get("du") or 0)
+
+                        segments.append(FlightSegment(
+                            airline=carrier_name, flight_no=f"{ac}{fl}",
+                            origin=seg.get("dac", req.origin),
+                            destination=seg.get("aac", req.destination),
+                            departure=dep_dt, arrival=arr_dt,
+                            duration_seconds=dur_min * 60,
+                        ))
+
+                    if not segments:
+                        continue
+
+                    total_dur = int(od.get("tdu", "0").replace(":", "")) if ":" in str(od.get("tdu", "")) else 0
+                    if total_dur == 0:
+                        total_dur = sum(s.duration_seconds for s in segments)
+                    else:
+                        # tdu = "02:20" → 2*3600 + 20*60
+                        tdu_str = od.get("tdu", "0:0")
+                        parts = tdu_str.split(":")
+                        if len(parts) == 2:
+                            total_dur = int(parts[0]) * 3600 + int(parts[1]) * 60
+
+                    route = FlightRoute(segments=segments, total_duration_seconds=total_dur, stopovers=max(0, len(segments) - 1))
+                    oid = hashlib.md5(f"ytra_{req.origin}{req.destination}{date_str}{price}{segments[0].flight_no}".encode()).hexdigest()[:12]
+
+                    bk_url = (
+                        f"{_BASE}/air-search-ui/fbdom_flight/trigger?"
+                        f"ADT={req.adults or 1}&CNN=0&INF=0&origin={req.origin}&destination={req.destination}"
+                        f"&flight_depart_date={req.date_from.strftime('%d/%m/%Y')}&type=O&viewName=normal&flexi=N&class=Economy"
                     )
-                    arr_dt = _parse_dt(
-                        seg.get("arrivalDateTime") or seg.get("arrival") or seg.get("arrTime")
-                        or seg.get("arrivalTime")
-                    )
-                    dur = seg.get("duration") or seg.get("eft") or seg.get("durationMinutes") or 0
 
-                    segments.append(FlightSegment(
-                        airline=carrier_name, flight_no=f"{carrier}{flight_no}",
-                        origin=dep_airport, destination=arr_airport,
-                        departure=dep_dt, arrival=arr_dt,
-                        duration_seconds=int(dur) * 60 if dur else 0,
+                    offers.append(FlightOffer(
+                        id=f"ytra_{oid}", price=round(price, 2), currency="INR",
+                        price_formatted=f"{price:.0f} INR",
+                        outbound=route, inbound=None,
+                        airlines=list({s.airline for s in segments if s.airline}),
+                        owner_airline=segments[0].airline if segments else "Yatra",
+                        booking_url=bk_url,
+                        is_locked=False, source="yatra_ota", source_tier="free",
                     ))
-
-                if not segments:
-                    continue
-
-                total_dur = sum(s.duration_seconds for s in segments)
-                route = FlightRoute(segments=segments, total_duration_seconds=total_dur, stopovers=max(0, len(segments) - 1))
-                oid = hashlib.md5(f"ytra_{req.origin}{req.destination}{date_str}{price}{segments[0].flight_no}".encode()).hexdigest()[:12]
-
-                total_price = round(price + ib_price, 2) if is_rt and ib_route else round(price, 2)
-                prefix = "ytra_rt_" if is_rt and ib_route else "ytra_"
-                trip_type = 'R' if req.return_from else 'O'
-                bk_url = f"{_BASE}/flights/search?type={trip_type}&ADT={req.adults or 1}&origin={req.origin}&destination={req.destination}&flight_depart_date={req.date_from.strftime('%d/%m/%Y')}&class=Economy"
-                if req.return_from:
-                    bk_ret = req.return_from.strftime('%d/%m/%Y') if hasattr(req.return_from, 'strftime') else str(req.return_from)
-                    bk_url += f"&flight_return_date={bk_ret}"
-
-                offers.append(FlightOffer(
-                    id=f"{prefix}{oid}", price=total_price, currency=currency,
-                    price_formatted=f"{total_price:.2f} {currency}",
-                    outbound=route, inbound=ib_route,
-                    airlines=list({s.airline for s in segments if s.airline}),
-                    owner_airline=segments[0].airline if segments else "Yatra",
-                    booking_url=bk_url,
-                    is_locked=False, source="yatra_ota", source_tier="free",
-                ))
-            except Exception as e:
-                logger.debug("Yatra parse error: %s", e)
+                except Exception as e:
+                    logger.debug("Yatra parse item error: %s", e)
 
         return offers
 

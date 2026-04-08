@@ -33,10 +33,9 @@ import os
 import shutil
 import subprocess
 import time
+import unicodedata
 from datetime import datetime, date as date_type, date, timedelta
 from typing import Optional
-
-import httpx
 
 from ..models.flights import (
     FlightOffer,
@@ -45,7 +44,7 @@ from ..models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
-from .browser import find_chrome, stealth_popen_kwargs, _launched_procs, proxy_chrome_args, auto_block_if_proxied, get_httpx_proxy_url
+from .browser import find_chrome, stealth_popen_kwargs, _launched_procs, proxy_chrome_args, auto_block_if_proxied
 from .airline_routes import get_country, CITY_AIRPORTS, city_match_set
 
 logger = logging.getLogger(__name__)
@@ -209,7 +208,7 @@ def _parse_tk_datetime(s: str) -> datetime:
 class TurkishConnectorClient:
     """Turkish Airlines CDP Chrome connector — form fill + availability interception."""
 
-    def __init__(self, timeout: float = 45.0):
+    def __init__(self, timeout: float = 60.0):
         self.timeout = timeout
 
     async def close(self):
@@ -244,15 +243,32 @@ class TurkishConnectorClient:
         # Slow path: CDP Chrome form fill + API interception
         # Retry once: first attempt warms PX cookies; second uses them.
         for attempt in range(2):
-            result = await self._do_search(req)
+            result = await self._do_search(req, attempt=attempt)
             if result.offers or attempt == 1:
                 return result
             logger.warning("TK: 0 offers on attempt %d — retrying with warm profile", attempt)
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.0)
         return self._empty(req)
 
     async def _try_sputnik(self, req: FlightSearchRequest) -> list[FlightOffer]:
-        """Fast path: EveryMundo Sputnik grouped-routes API."""
+        """Fast path: EveryMundo Sputnik grouped-routes API with reverse fallback."""
+        offers = await self._try_sputnik_direction(req, origin=req.origin, destination=req.destination, reverse=False)
+        logger.info("TK Sputnik %s→%s: %d offers", req.origin, req.destination, len(offers))
+
+        # EveryMundo caches fares from TK hub airports outbound.
+        # For non-hub origins (e.g. LHR→IST), try destination→origin and swap legs.
+        if not offers:
+            rev_offers = await self._try_sputnik_direction(
+                req, origin=req.destination, destination=req.origin, reverse=True,
+            )
+            if rev_offers:
+                logger.info("TK Sputnik reverse %s→%s: %d offers", req.destination, req.origin, len(rev_offers))
+            return rev_offers
+
+        return offers
+
+    async def _try_sputnik_direction(self, req: FlightSearchRequest, *, origin: str, destination: str, reverse: bool = False) -> list[FlightOffer]:
+        """Query Sputnik for a specific origin→destination. If reverse=True, swap outbound/inbound."""
         try:
             dt = req.date_from
             if isinstance(dt, datetime):
@@ -275,13 +291,16 @@ class TurkishConnectorClient:
             "budget": {"maximum": None},
             "passengers": {"adults": max(1, req.adults or 1)},
             "travelClasses": ["ECONOMY"],
-            "flightType": "ROUND_TRIP" if req.return_from else "ONE_WAY",
+            "flightType": "ROUND_TRIP",   # Always RT — more cached fares, extractable for OW
             "flexibleDates": True,
             "faresPerRoute": "10",
             "trfxRoutes": True,
             "routesLimit": 500,
             "sorting": [{"popularity": "DESC"}],
             "airlineCode": "tk",
+            # Filter to specific O&D — without this, only top-14 popular routes returned
+            "origins": [origin],
+            "destinations": [destination],
         }
 
         try:
@@ -293,13 +312,14 @@ class TurkishConnectorClient:
                 return []
             data = r.json()
             if not isinstance(data, list):
+                logger.info("TK Sputnik: unexpected type %s", type(data).__name__)
                 return []
         except Exception as e:
             logger.info("TK Sputnik error: %s", e)
             return []
 
-        origin_set = city_match_set(req.origin)
-        dest_set = city_match_set(req.destination)
+        origin_set = city_match_set(origin)
+        dest_set = city_match_set(destination)
 
         offers = []
         for route in data:
@@ -354,9 +374,14 @@ class TurkishConnectorClient:
                     )
                     inbound = FlightRoute(segments=[ret_seg], total_duration_seconds=0, stopovers=0)
 
+                # Reverse mode: Sputnik data is dest→orig, user wants orig→dest
+                # Swap outbound↔inbound so user sees their direction first
+                if reverse and inbound is not None:
+                    outbound, inbound = inbound, outbound
+
                 ret_token = f"_{ret_str}" if ret_str else ""
                 fid = hashlib.md5(
-                    f"tk_{orig}_{dest}_{dep_str}{ret_token}_{price_f}".encode()
+                    f"tk_{req.origin}_{req.destination}_{dep_str}{ret_token}_{price_f}".encode()
                 ).hexdigest()[:12]
 
                 target_date = req.date_from.strftime("%Y-%m-%d") if hasattr(req.date_from, "strftime") else str(req.date_from)
@@ -380,10 +405,9 @@ class TurkishConnectorClient:
                     },
                 ))
 
-        logger.info("TK Sputnik %s→%s: %d offers", req.origin, req.destination, len(offers))
         return offers
 
-    async def _do_search(self, req: FlightSearchRequest) -> FlightSearchResponse:
+    async def _do_search(self, req: FlightSearchRequest, *, attempt: int = 0) -> FlightSearchResponse:
         t0 = time.monotonic()
         import json as _json
         import re as _re
@@ -554,153 +578,166 @@ class TurkishConnectorClient:
         )
 
         try:
-            # ── Phase 0: Homepage warm-up to establish session cookies ──
-            # On fresh Chrome profiles, TK ignores booking URL query params
-            # and fills the form with geo-IP defaults (e.g. nearest airport).
-            # A prior homepage visit sets the session cookies that make the
-            # booking URL params work (origin/dest/date pre-populated).
-            try:
+            # On retry, PX cookies are already set from attempt 0.
+            # Skip Phase 0 warm-up + Path 1 booking URL + Path 2 direct fetch
+            # and go directly to homepage form fill (Path 3) to save ~20s.
+            goto_path3 = attempt > 0
+            if goto_path3:
+                logger.warning("TK: retry attempt %d — skipping to Path 3 (homepage form)", attempt)
+
+            if not goto_path3:
+                # ── Phase 0: Homepage warm-up to establish session cookies ──
+                # On fresh Chrome profiles, TK ignores booking URL query params
+                # and fills the form with geo-IP defaults (e.g. nearest airport).
+                # A prior homepage visit sets the session cookies that make the
+                # booking URL params work (origin/dest/date pre-populated).
+                try:
+                    await page.goto(
+                        "https://www.turkishairlines.com/en-int/",
+                        wait_until="domcontentloaded",
+                        timeout=15000,
+                    )
+                    # Give PX ~3s to solve its challenge and set domain cookies.
+                    await asyncio.sleep(3.0)
+                    await self._dismiss_cookies(page)
+                except Exception:
+                    pass  # warm-up failure is non-fatal
+
+                # ── Path 1: Booking URL (airports pre-filled) + click search ──
+                booking_url = self._booking_url(req)
+                logger.warning("TK: loading booking URL for %s→%s on %s", req.origin, req.destination, target_iso)
                 await page.goto(
-                    "https://www.turkishairlines.com/en-int/",
+                    booking_url,
                     wait_until="domcontentloaded",
-                    timeout=15000,
+                    timeout=int(self.timeout * 1000),
                 )
-                await asyncio.sleep(3.0)
-                await self._dismiss_cookies(page)
-            except Exception:
-                pass  # warm-up failure is non-fatal
 
-            # ── Path 1: Booking URL (airports pre-filled) + click search ──
-            # The booking URL redirects to homepage with origin/dest pre-filled.
-            # Calendar doesn't open on TK's new React UI — so we skip date fill
-            # entirely and rely on the route interceptor to fix the date.
-            booking_url = self._booking_url(req)
-            logger.warning("TK: loading booking URL for %s→%s on %s", req.origin, req.destination, target_iso)
-            await page.goto(
-                booking_url,
-                wait_until="domcontentloaded",
-                timeout=int(self.timeout * 1000),
-            )
-            await asyncio.sleep(5.0)
-            await self._dismiss_cookies(page)
-            await asyncio.sleep(1.0)
-
-            # Dismiss overlays + error modals (TK renders i18n-key error modals on fresh profiles)
-            await self._remove_overlays(page)
-
-            # One-way toggle (only for OW searches; RT is the default)
-            if not req.return_from:
-                try:
-                    # Text may be translated ("One way") or i18n key ("Booker.OneWay")
-                    ow = page.locator("span:has-text('One way'), span:has-text('Booker.OneWay')").first
-                    if await ow.count() > 0:
-                        await ow.click(timeout=5000, force=True)
-                        logger.warning("TK: One-way selected")
-                except Exception:
-                    pass
-            await asyncio.sleep(1.0)
-
-            # Diagnostic: check displayed date
-            displayed = await page.evaluate("""() => {
-                const dp = document.querySelector('#bookerDatepicker');
-                if (!dp) return {exists: false};
-                const day = dp.querySelector('[class*="placeholder-ready-day"]');
-                const month = dp.querySelector('[class*="placeholder-ready-month"]');
-                const fromVal = document.querySelector('#fromPort')?.value;
-                const toVal = document.querySelector('#toPort')?.value;
-                return {
-                    exists: true,
-                    day: day?.textContent?.trim(),
-                    month: month?.textContent?.trim(),
-                    from: fromVal, to: toVal,
-                };
-            }""")
-            logger.warning("TK: form state — %s", displayed)
-
-            # ── Fix airports if booking URL params weren't picked up ──
-            form_from = (displayed or {}).get("from", "") or ""
-            form_to = (displayed or {}).get("to", "") or ""
-            form_day = (displayed or {}).get("day")
-            manually_filled = False
-
-            if not form_to:
-                logger.warning(
-                    "TK: booking URL didn't populate form (from=%r, to=%r), filling manually",
-                    form_from, form_to,
-                )
-                ok1 = await self._fill_airport(page, "#fromPort", req.origin)
-                if ok1:
-                    await asyncio.sleep(0.8)
-                ok2 = await self._fill_airport(page, "#toPort", req.destination)
-                if ok2:
-                    await asyncio.sleep(0.8)
-                manually_filled = ok1 and ok2
-
-                if manually_filled and not form_day:
-                    # Try to get a date into the form (route interceptor will
-                    # correct it to the target date regardless).
-                    await self._fill_date(page, req.date_from)
-                    await asyncio.sleep(0.5)
-
-            # ── Click "Search flights" ──
-            # Remove overlays right before clicking (modals may reappear)
-            await self._remove_overlays(page)
-            search_clicked = False
-            # Match translated text OR i18n keys
-            for btn_text in ["Search flights", "Booker.SearchFlights", "Search", "Find flights"]:
-                try:
-                    btn = page.locator(f"button:has-text('{btn_text}')").first
-                    if await btn.count() > 0 and await btn.is_visible():
-                        await btn.click(timeout=5000, force=True)
-                        logger.warning("TK: clicked '%s'", btn_text)
-                        search_clicked = True
+                # PX challenge page may load first — poll for form to appear
+                # as PX solves its challenge in the background (5-30s).
+                form_poll_deadline = time.monotonic() + 5
+                form_appeared = False
+                while time.monotonic() < form_poll_deadline:
+                    await asyncio.sleep(2.0)
+                    form_appeared = await page.evaluate("""() => {
+                        return !!(document.querySelector('#fromPort') ||
+                                  document.querySelector('#bookerDatepicker') ||
+                                  document.querySelector('[class*="booker-search"]'));
+                    }""")
+                    if form_appeared:
+                        logger.warning("TK: form appeared after PX solve (%.1fs)",
+                                       time.monotonic() - t0)
                         break
-                except Exception:
-                    continue
+                    # Also check if API was already fired (TK auto-searches from URL params)
+                    if avail_data:
+                        logger.warning("TK: availability captured during PX wait!")
+                        break
+                if not form_appeared and not avail_data:
+                    logger.warning("TK: form did not appear after 5s PX wait")
 
-            if not search_clicked:
-                # CSS class fallback (works regardless of i18n)
-                search_clicked = bool(await page.evaluate("""() => {
-                    // Method 1: by class containing searchButton
-                    const byClass = document.querySelector('[class*="searchButton"], [class*="SearchButton"]');
-                    if (byClass && byClass.offsetHeight > 0) {
-                        byClass.click();
-                        return 'class:' + (byClass.textContent || '').trim().slice(0, 30);
-                    }
-                    // Method 2: by text patterns
-                    const patterns = ['search', 'find flights', 'booker.searchflights'];
-                    for (const b of document.querySelectorAll('button')) {
-                        const t = (b.textContent || '').toLowerCase().trim();
-                        if (b.offsetHeight > 0 && patterns.some(p => t.includes(p))) {
-                            b.click();
-                            return t.slice(0, 40);
-                        }
-                    }
-                    return null;
-                }"""))
-
-            if search_clicked:
-                logger.warning("TK: search clicked, waiting for availability API…")
-            else:
-                logger.warning("TK: could not click search button")
-
-            # Wait for availability API (crypto challenge may add latency)
-            # Shorter wait if airports were manually filled (form may not submit properly)
-            wait_secs = 10 if manually_filled else 20
-            avail_deadline = time.monotonic() + wait_secs
-            while not avail_data and not px_blocked and time.monotonic() < avail_deadline:
+                await self._dismiss_cookies(page)
                 await asyncio.sleep(0.5)
+                await self._remove_overlays(page)
 
-            # ── Path 2: Direct API call from page context ──
-            # When the form can't be submitted (date picker won't open, search
-            # button not found), bypass the form entirely and call the API via
-            # fetch() inside the page.  PX cookies from the warm-up visit are
-            # included automatically (same-origin request).
-            if not avail_data and not px_blocked:
-                logger.warning("TK: form didn't trigger API, attempting direct fetch from page context")
-                try:
-                    direct_fetch_active = True
-                    direct_result = await page.evaluate(
+                if not req.return_from:
+                    try:
+                        ow = page.locator("span:has-text('One way'), span:has-text('Booker.OneWay')").first
+                        if await ow.count() > 0:
+                            await ow.click(timeout=5000, force=True)
+                            logger.warning("TK: One-way selected")
+                    except Exception:
+                        pass
+                await asyncio.sleep(1.0)
+
+                displayed = await page.evaluate("""() => {
+                    const dp = document.querySelector('#bookerDatepicker');
+                    if (!dp) return {exists: false};
+                    const day = dp.querySelector('[class*="placeholder-ready-day"]');
+                    const month = dp.querySelector('[class*="placeholder-ready-month"]');
+                    const fromVal = document.querySelector('#fromPort')?.value;
+                    const toVal = document.querySelector('#toPort')?.value;
+                    return {
+                        exists: true,
+                        day: day?.textContent?.trim(),
+                        month: month?.textContent?.trim(),
+                        from: fromVal, to: toVal,
+                    };
+                }""")
+                logger.warning("TK: form state — %s", displayed)
+
+                form_exists = (displayed or {}).get("exists", False)
+                form_from = (displayed or {}).get("from", "") or ""
+                form_to = (displayed or {}).get("to", "") or ""
+                form_day = (displayed or {}).get("day")
+                manually_filled = False
+                search_clicked = False
+
+                if not form_exists:
+                    logger.warning("TK: form not rendered, skipping form fill → direct fetch")
+                elif not form_to:
+                    logger.warning(
+                        "TK: booking URL didn't populate form (from=%r, to=%r), filling manually",
+                        form_from, form_to,
+                    )
+                    ok1 = await self._fill_airport(page, "#fromPort", req.origin)
+                    if ok1:
+                        await asyncio.sleep(0.8)
+                    ok2 = await self._fill_airport(page, "#toPort", req.destination)
+                    if ok2:
+                        await asyncio.sleep(0.8)
+                    manually_filled = ok1 and ok2
+
+                    if manually_filled and not form_day:
+                        await self._fill_date(page, req.date_from)
+                        await asyncio.sleep(0.5)
+
+                if form_exists:
+                    await self._remove_overlays(page)
+                    for btn_text in ["Search flights", "Booker.SearchFlights", "Search", "Find flights"]:
+                        try:
+                            btn = page.locator(f"button:has-text('{btn_text}')").first
+                            if await btn.count() > 0 and await btn.is_visible():
+                                await btn.click(timeout=5000, force=True)
+                                logger.warning("TK: clicked '%s'", btn_text)
+                                search_clicked = True
+                                break
+                        except Exception:
+                            continue
+
+                if not search_clicked and form_exists:
+                    search_clicked = bool(await page.evaluate("""() => {
+                        const byClass = document.querySelector('[class*="searchButton"], [class*="SearchButton"]');
+                        if (byClass && byClass.offsetHeight > 0) {
+                            byClass.click();
+                            return 'class:' + (byClass.textContent || '').trim().slice(0, 30);
+                        }
+                        const patterns = ['search', 'find flights', 'booker.searchflights'];
+                        for (const b of document.querySelectorAll('button')) {
+                            const t = (b.textContent || '').toLowerCase().trim();
+                            if (b.offsetHeight > 0 && patterns.some(p => t.includes(p))) {
+                                b.click();
+                                return t.slice(0, 40);
+                            }
+                        }
+                        return null;
+                    }"""))
+
+                if search_clicked:
+                    logger.warning("TK: search clicked, waiting for availability API…")
+                elif form_exists:
+                    logger.warning("TK: could not click search button")
+
+                if form_exists:
+                    wait_secs = 10 if manually_filled else 20
+                    avail_deadline = time.monotonic() + wait_secs
+                    while not avail_data and not px_blocked and time.monotonic() < avail_deadline:
+                        await asyncio.sleep(0.5)
+
+                # ── Path 2: Direct API call from page context ──
+                if not avail_data and not px_blocked:
+                    logger.warning("TK: form didn't trigger API, attempting direct fetch from page context")
+                    try:
+                        direct_fetch_active = True
+                        direct_result = await page.evaluate(
                         """async (args) => {
                         const [origin, dest, dateDMY, adults, isRt, retDateDMY] = args;
                         const controller = new AbortController();
@@ -754,50 +791,63 @@ class TurkishConnectorClient:
                         [req.origin, req.destination, target_dmy, str(req.adults or 1),
                          bool(req.return_from),
                          _to_datetime(req.return_from).strftime("%d-%m-%Y") if req.return_from else ""],
-                    )
-                    # Give _on_response a moment to process
-                    await asyncio.sleep(0.5)
-                    # Parse the evaluate result directly (more reliable than _on_response timing)
-                    if not avail_data and isinstance(direct_result, dict):
-                        body = direct_result.get("_body")
-                        status = direct_result.get("_status")
-                        if status == 200 and isinstance(body, dict) and "data" in body:
-                            inner = body["data"]
-                            if isinstance(inner, dict) and "originDestinationInformationList" in inner:
-                                avail_data.update(inner)
-                                opts = inner.get("originDestinationInformationList", [{}])[0]
-                                n = len(opts.get("originDestinationOptionList", []))
-                                logger.warning("TK: direct fetch returned %d options", n)
-                            else:
-                                logger.warning("TK: direct fetch 200 but data=%s, resp=%s",
-                                               type(inner).__name__,
-                                               str(body)[:500])
-                        elif status == 428:
-                            logger.warning("TK: direct fetch got 428 (PX crypto challenge)")
-                        elif status == 403:
-                            px_blocked = True
-                            logger.warning("TK: direct fetch got 403 (PX blocked)")
-                        elif status:
-                            text_preview = direct_result.get("_text", str(body)[:200] if body else "")
-                            logger.warning("TK: direct fetch status %s: %s", status, text_preview[:200])
-                        elif direct_result.get("_error"):
-                            logger.warning("TK: direct fetch error: %s", direct_result["_error"])
-                except Exception as e:
-                    logger.warning("TK: direct fetch exception: %s", e)
-                finally:
-                    direct_fetch_active = False
+                        )
+                        # Give _on_response a moment to process
+                        await asyncio.sleep(0.5)
+                        # Parse the evaluate result directly (more reliable than _on_response timing)
+                        if not avail_data and isinstance(direct_result, dict):
+                            body = direct_result.get("_body")
+                            status = direct_result.get("_status")
+                            if status == 200 and isinstance(body, dict) and "data" in body:
+                                inner = body["data"]
+                                if isinstance(inner, dict) and "originDestinationInformationList" in inner:
+                                    avail_data.update(inner)
+                                    opts = inner.get("originDestinationInformationList", [{}])[0]
+                                    n = len(opts.get("originDestinationOptionList", []))
+                                    logger.warning("TK: direct fetch returned %d options", n)
+                                else:
+                                    logger.warning("TK: direct fetch 200 but data=%s, resp=%s",
+                                                   type(inner).__name__,
+                                                   str(body)[:500])
+                            elif status == 428:
+                                logger.warning("TK: direct fetch got 428 (PX crypto challenge)")
+                            elif status == 403:
+                                px_blocked = True
+                                logger.warning("TK: direct fetch got 403 (PX blocked)")
+                            elif status:
+                                text_preview = direct_result.get("_text", str(body)[:200] if body else "")
+                                logger.warning("TK: direct fetch status %s: %s", status, text_preview[:200])
+                            elif direct_result.get("_error"):
+                                logger.warning("TK: direct fetch error: %s", direct_result["_error"])
+                    except Exception as e:
+                        logger.warning("TK: direct fetch exception: %s", e)
+                    finally:
+                        direct_fetch_active = False
 
             # ── Path 3 fallback: homepage form fill ──
-            if not avail_data and not px_blocked:
-                logger.warning("TK: Paths 1-2 didn't trigger API, trying homepage form fill")
-                await page.goto(
-                    "https://www.turkishairlines.com/en-int/",
-                    wait_until="domcontentloaded",
-                    timeout=int(self.timeout * 1000),
-                )
-                await asyncio.sleep(5.0)
+            if goto_path3 or (not avail_data and not px_blocked):
+                if goto_path3:
+                    logger.warning("TK: retry — direct homepage form fill")
+                else:
+                    logger.warning("TK: Paths 1-2 didn't trigger API, trying homepage form fill")
+                # goto may ERR_ABORTED if PX was navigating the page — retry once
+                for _nav in range(2):
+                    try:
+                        await page.goto(
+                            "https://www.turkishairlines.com/en-int/",
+                            wait_until="domcontentloaded",
+                            timeout=int(self.timeout * 1000),
+                        )
+                        break
+                    except Exception as nav_err:
+                        if _nav == 0:
+                            logger.warning("TK: homepage goto failed (%s), retrying", nav_err)
+                            await asyncio.sleep(2)
+                        else:
+                            logger.warning("TK: homepage goto failed twice, skipping form fill")
+                await asyncio.sleep(3.0)
                 await self._dismiss_cookies(page)
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
                 await self._remove_overlays(page)
 
                 # One-way (only for OW)
@@ -808,7 +858,7 @@ class TurkishConnectorClient:
                             await ow.click(timeout=5000, force=True)
                     except Exception:
                         pass
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)
 
                 # Fill airports (works reliably)
                 ok = await self._fill_airport(page, "#fromPort", req.origin)
@@ -817,13 +867,15 @@ class TurkishConnectorClient:
                     ok = await self._fill_airport(page, "#toPort", req.destination)
 
                 if ok:
-                    await asyncio.sleep(1.0)
-                    # Try date fill (may fail — calendar won't open)
-                    await self._fill_date(page, req.date_from)
+                    await asyncio.sleep(0.5)
+                    # Try to fill the date — essential for TK's React code to fire the API.
+                    # Even if the visual calendar doesn't open, keyboard/injection
+                    # approaches may set the date in the underlying form state.
+                    ok = await self._fill_date(page, req.date_from)
                     await asyncio.sleep(0.5)
                     await self._remove_overlays(page)
 
-                    # Click search — match translated + i18n keys + class
+                    # Click search — even without date, it establishes PX interaction score
                     for btn_text in ["Search flights", "Booker.SearchFlights", "Search"]:
                         try:
                             btn = page.locator(f"button:has-text('{btn_text}')").first
@@ -834,16 +886,19 @@ class TurkishConnectorClient:
                         except Exception:
                             continue
 
-                # Wait again
-                deadline2 = time.monotonic() + 20
-                while not avail_data and not px_blocked and time.monotonic() < deadline2:
-                    await asyncio.sleep(0.5)
+                # Brief wait — search may trigger API if airport+date were pre-filled
+                if ok:
+                    deadline2 = time.monotonic() + 5
+                    while not avail_data and not px_blocked and time.monotonic() < deadline2:
+                        await asyncio.sleep(0.5)
 
-            # ── Final wait for crypto challenge resolution ──
-            remaining = max(self.timeout - (time.monotonic() - t0), 10)
-            deadline = time.monotonic() + remaining
-            while not avail_data and not px_blocked and time.monotonic() < deadline:
-                await asyncio.sleep(0.5)
+            # ── Brief final wait for any pending crypto challenge ──
+            if not avail_data and not px_blocked:
+                final_wait = min(max(self.timeout - (time.monotonic() - t0), 0), 5)
+                if final_wait > 0:
+                    deadline = time.monotonic() + final_wait
+                    while not avail_data and not px_blocked and time.monotonic() < deadline:
+                        await asyncio.sleep(0.5)
 
             if px_blocked:
                 logger.warning("TK: PerimeterX blocked, resetting profile")
@@ -955,38 +1010,88 @@ class TurkishConnectorClient:
 
     async def _fill_airport(self, page, selector: str, iata: str) -> bool:
         """Fill an airport typeahead and select first match."""
+        # City name lookup for retry when IATA typeahead gives geo-biased results
+        _IATA_CITY = {
+            "IST": "Istanbul", "SAW": "Sabiha", "ESB": "Ankara", "ADB": "Izmir",
+            "LHR": "Heathrow", "LGW": "Gatwick", "STN": "Stansted", "LTN": "Luton",
+            "JFK": "Kennedy", "EWR": "Newark", "LAX": "Los Angeles", "ORD": "Chicago",
+            "CDG": "Paris", "FRA": "Frankfurt", "AMS": "Amsterdam", "MUC": "Munich",
+            "BCN": "Barcelona", "MAD": "Madrid", "FCO": "Rome", "MXP": "Milan",
+            "ATH": "Athens", "VIE": "Vienna", "ZRH": "Zurich", "BRU": "Brussels",
+            "CPH": "Copenhagen", "OSL": "Oslo", "ARN": "Stockholm", "HEL": "Helsinki",
+            "DXB": "Dubai", "DOH": "Doha", "AUH": "Abu Dhabi", "RUH": "Riyadh",
+            "BOM": "Mumbai", "DEL": "Delhi", "SIN": "Singapore", "BKK": "Bangkok",
+            "HKG": "Hong Kong", "NRT": "Narita", "ICN": "Incheon", "KUL": "Kuala Lumpur",
+            "SYD": "Sydney", "MEL": "Melbourne", "AKL": "Auckland",
+            "JNB": "Johannesburg", "CAI": "Cairo", "CMN": "Casablanca",
+            "GRU": "Sao Paulo", "EZE": "Buenos Aires", "MEX": "Mexico City",
+            "YYZ": "Toronto", "YVR": "Vancouver",
+        }
         try:
             field = page.locator(selector)
-            # Wait for field to be visible before interacting
+            # Wait for field to be attached (not just visible — PX may hide it)
             try:
-                await field.wait_for(state="visible", timeout=10000)
+                await field.wait_for(state="attached", timeout=15000)
             except Exception:
-                logger.warning("TK: %s not visible after 10s", selector)
+                logger.warning("TK: %s not in DOM after 15s", selector)
                 return False
-            # Remove overlays first, then force-click
-            await self._remove_overlays(page)
-            await field.click(timeout=5000, force=True)
-            await asyncio.sleep(0.3)
-            await field.click(click_count=3, force=True)
-            await asyncio.sleep(0.1)
-            await field.fill("")
-            await asyncio.sleep(0.1)
-            await field.type(iata, delay=80)
-            await asyncio.sleep(2.5)
+            # Do NOT call _remove_overlays here — it triggers React re-render
+            # that temporarily unmounts form elements.  Overlays are already
+            # removed in the Path 3 main flow.
 
-            # Remove overlays again before clicking option
-            await self._remove_overlays(page)
+            async def _try_typeahead(query: str) -> bool:
+                """Type query, wait for options, try to match IATA code."""
+                await field.click(timeout=5000, force=True)
+                await asyncio.sleep(0.3)
+                await field.click(click_count=3, timeout=3000, force=True)
+                await asyncio.sleep(0.1)
+                await field.fill("", timeout=3000, force=True)
+                await asyncio.sleep(0.1)
+                await field.type(query, delay=80, timeout=5000)
+                await asyncio.sleep(3.0)
 
-            # Click first matching airport option (skip "see all" links)
-            opts = page.locator("[role='option']")
-            count = await opts.count()
-            for i in range(min(count, 5)):
-                opt = opts.nth(i)
-                text = await opt.inner_text()
-                if iata.upper() in text.upper() or i == min(1, count - 1):
-                    await opt.click(timeout=3000, force=True)
-                    value = await field.input_value()
-                    logger.info("TK: filled %s -> %s", selector, value)
+                opts = page.locator("[role='option']")
+                count = await opts.count()
+                for i in range(min(count, 10)):
+                    opt = opts.nth(i)
+                    text = await opt.inner_text()
+                    norm = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().upper()
+                    if iata.upper() in norm or f"({iata.upper()})" in text.upper():
+                        await opt.click(timeout=3000, force=True)
+                        await asyncio.sleep(0.5)
+                        value = await field.input_value()
+                        if not value:
+                            await field.press("Enter")
+                            await asyncio.sleep(0.3)
+                            value = await field.input_value()
+                        logger.info("TK: filled %s -> %s (query='%s', matched '%s')",
+                                    selector, value, query, text.strip()[:40])
+                        return True
+
+                # Verify first option contains IATA before using as fallback
+                if count > 0:
+                    first_text = await opts.first.inner_text()
+                    first_norm = unicodedata.normalize("NFKD", first_text).encode("ascii", "ignore").decode().upper()
+                    if iata.upper() in first_norm or f"({iata.upper()})" in first_text.upper():
+                        await opts.first.click(timeout=3000, force=True)
+                        await asyncio.sleep(0.5)
+                        value = await field.input_value()
+                        logger.info("TK: filled %s -> %s (first option verified, query='%s')",
+                                    selector, value, query)
+                        return True
+                    logger.warning("TK: %s options for query '%s' don't match %s (first: '%s')",
+                                   selector, query, iata, first_text.strip()[:40])
+                return False
+
+            # Attempt 1: type IATA code
+            if await _try_typeahead(iata):
+                return True
+
+            # Attempt 2: type city name (more robust against geo-biased results)
+            city = _IATA_CITY.get(iata.upper())
+            if city:
+                logger.info("TK: retrying %s with city name '%s'", selector, city)
+                if await _try_typeahead(city):
                     return True
 
             # Keyboard fallback
@@ -1155,7 +1260,9 @@ class TurkishConnectorClient:
             logger.warning("TK: after click — calendars: %s, headings: %s",
                           cal_check.get("calendars"), cal_check.get("monthHeadings"))
 
-            if cal_check.get("calendars") or cal_check.get("monthHeadings"):
+            if cal_check.get("monthHeadings"):
+                # Only enter calendar navigation if actual month headings visible
+                # (not just container DIVs with calendar CSS classes)
                 calendar_opened = True
                 return await self._navigate_calendar_and_click_day(
                     page, target_day, target_month, target_year, date_iso
@@ -1277,7 +1384,7 @@ class TurkishConnectorClient:
     ) -> bool:
         """Navigate visible calendar to target month and click the day."""
         try:
-            for click_idx in range(18):
+            for click_idx in range(6):
                 # Check current visible month(s)
                 visible = await page.evaluate("""() => {
                     const all = document.querySelectorAll(
@@ -1348,7 +1455,7 @@ class TurkishConnectorClient:
                     break
                 await asyncio.sleep(0.8)
             else:
-                logger.warning("TK: exhausted 18 calendar clicks, visible: %s", visible)
+                logger.warning("TK: exhausted 6 calendar clicks, visible: %s", visible)
 
             await asyncio.sleep(0.5)
 
