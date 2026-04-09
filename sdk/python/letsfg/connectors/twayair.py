@@ -87,8 +87,8 @@ _tw_csrf_token: str = ""
 _tw_csrf_header: str = "X-CSRF-TOKEN"
 
 # CDP Chrome (primary browser tier — headed, no headless)
-_DEBUG_PORT = 9451
-_USER_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".twayair_chrome_data")
+_DEBUG_PORT = 9506
+_USER_DATA_DIR = os.path.join(os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".twayair_chrome_data")
 _pw_instance = None
 _cdp_browser = None
 _chrome_proc = None

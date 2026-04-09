@@ -37,9 +37,9 @@ from .browser import find_chrome, stealth_popen_kwargs, _launched_procs
 logger = logging.getLogger(__name__)
 
 _BASE = "https://www.flightcatchers.com"
-_CDP_PORT = 9496
+_CDP_PORT = 9518
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".flightcatchers_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".flightcatchers_chrome_data"
 )
 
 _pw_instance = None

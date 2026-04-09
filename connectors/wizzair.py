@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 _IMPERSONATE = "chrome131"
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
 )
 _FALLBACK_VERSION = "28.3.0"
 _MAX_ATTEMPTS = 2

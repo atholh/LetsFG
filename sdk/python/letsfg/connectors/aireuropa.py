@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 _DEBUG_PORT = 9498
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".aireuropa_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".aireuropa_chrome_data"
 )
 
 _browser = None
@@ -292,7 +292,7 @@ class AirEuropaConnectorClient:
             # Always use the homepage form fill approach.
             logger.info("AirEuropa: using form fill on homepage")
             await page.goto(self.HOMEPAGE, wait_until="domcontentloaded", timeout=20000)
-            await asyncio.sleep(4.0)
+            await asyncio.sleep(2.0)
             await _dismiss_overlays(page)
             # Remove any lingering CDK/Angular overlays that block interaction
             await page.evaluate("""() => {
@@ -350,7 +350,7 @@ class AirEuropaConnectorClient:
                 }
             }""")
             logger.info("AirEuropa: search button clicked, waiting for SPA navigation")
-            await asyncio.sleep(8.0)
+            await asyncio.sleep(3.0)
 
             remaining = max(self.timeout - (time.monotonic() - t0), 15)
             deadline = time.monotonic() + remaining
@@ -359,7 +359,7 @@ class AirEuropaConnectorClient:
                     break
                 url = page.url
                 if any(k in url.lower() for k in ["result", "booking", "digital.aireuropa", "availability", "select"]):
-                    await asyncio.sleep(6.0)
+                    await asyncio.sleep(2.5)
                     break
                 await asyncio.sleep(1.0)
 
@@ -627,7 +627,7 @@ class AirEuropaConnectorClient:
         return datetime.now()
 
     async def _scrape_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
-        await asyncio.sleep(3)
+        await asyncio.sleep(1.5)
         flights = await page.evaluate(r"""(params) => {
             const [origin, destination] = params;
             const results = [];

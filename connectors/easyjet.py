@@ -54,7 +54,7 @@ _VIEWPORTS = [
 
 _DEBUG_PORT = 9450
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".easyjet_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".easyjet_chrome_data"
 )
 
 _pw_instance = None

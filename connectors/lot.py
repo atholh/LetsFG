@@ -41,9 +41,9 @@ from .browser import find_chrome, stealth_popen_kwargs, _launched_procs, proxy_c
 
 logger = logging.getLogger(__name__)
 
-_DEBUG_PORT = 9459
+_DEBUG_PORT = 9511
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".lo_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".lo_chrome_data"
 )
 
 _AIR_BOUNDS_URL = "https://www.lot.com/api/v1/ibe/search/air-bounds"

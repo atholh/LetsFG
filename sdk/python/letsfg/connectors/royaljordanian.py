@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 _DEBUG_PORT = 9501
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".royaljordanian_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".royaljordanian_chrome_data"
 )
 
 _browser = None
@@ -238,7 +238,7 @@ class RoyalJordanianConnectorClient:
         try:
             logger.info("RoyalJordanian: loading homepage for %s→%s", req.origin, req.destination)
             await page.goto(self.HOMEPAGE, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(2.0)
             await _dismiss_overlays(page)
 
             # Compute date in YYYYMMDD format (RJ booking engine format)
@@ -339,7 +339,7 @@ class RoyalJordanianConnectorClient:
                 logger.info("RoyalJordanian: resp → %s", str(ajax_result.get('resp', ''))[:200])
 
             # Wait for booking engine page to load and render results
-            await asyncio.sleep(8.0)
+            await asyncio.sleep(3.0)
             remaining = max(self.timeout - (time.monotonic() - t0), 10)
             deadline = time.monotonic() + remaining
             while time.monotonic() < deadline:

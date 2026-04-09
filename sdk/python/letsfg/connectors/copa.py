@@ -60,7 +60,7 @@ _SPUTNIK_MARKETS = ["PA", "US", "CO", "BR", "MX"]
 
 _DEBUG_PORT = 9487
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".cm_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".cm_chrome_data"
 )
 
 _browser = None

@@ -50,9 +50,9 @@ from .browser import find_chrome, stealth_popen_kwargs, _launched_procs
 logger = logging.getLogger(__name__)
 
 _BASE = "https://www.travelgenio.com"
-_CDP_PORT = 9495
+_CDP_PORT = 9521
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".travelgenio_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".travelgenio_chrome_data"
 )
 
 _pw_instance = None

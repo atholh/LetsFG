@@ -89,7 +89,7 @@ _TURKEY_AIRPORTS = {
 }
 
 # ── Shared browser singleton via CDP ────────────────────────────────────
-_CDP_PORT = 9454
+_CDP_PORT = 9509
 _chrome_proc: Optional[subprocess.Popen] = None
 _browser = None
 _pw_instance = None

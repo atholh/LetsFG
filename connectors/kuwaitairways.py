@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 _DEBUG_PORT = 9502
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".kuwaitairways_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".kuwaitairways_chrome_data"
 )
 
 _browser = None
@@ -230,7 +230,7 @@ class KuwaitAirwaysConnectorClient:
         try:
             logger.info("KuwaitAirways: loading homepage for %s→%s", req.origin, req.destination)
             await page.goto(self.HOMEPAGE, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(2.0)
             await _dismiss_overlays(page)
 
             # One-way toggle — Kuwait Airways uses radio input#tid2 value="O"
@@ -286,7 +286,7 @@ class KuwaitAirwaysConnectorClient:
                     break
                 url = page.url
                 if any(k in url.lower() for k in ["result", "search", "flight", "availability", "digital."]):
-                    await asyncio.sleep(8.0)  # Amadeus NDB Angular app needs time to render
+                    await asyncio.sleep(3.0)  # Amadeus NDB Angular app needs time to render
                     break
                 await asyncio.sleep(1.0)
 
@@ -497,7 +497,7 @@ class KuwaitAirwaysConnectorClient:
         return datetime.now()
 
     async def _scrape_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
-        await asyncio.sleep(5)
+        await asyncio.sleep(1.5)
         # Amadeus NDB (digital.kuwaitairways.com) uses Angular with specific CSS classes
         flights = await page.evaluate(r"""(params) => {
             const [origin, destination] = params;

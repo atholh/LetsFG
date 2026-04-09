@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 _MAX_ATTEMPTS = 4
 _CDP_PORT = 9444
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".jetstar_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".jetstar_chrome_data"
 )
 
 _pw_instance = None

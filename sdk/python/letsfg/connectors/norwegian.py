@@ -70,11 +70,11 @@ _CLIENT_SECRET = "mrYaim0FdBrNRRZf"
 _TOKEN_URL = "https://api-des.norwegian.com/v1/security/oauth2/token/initialization"
 _SEARCH_URL = "https://api-des.norwegian.com/airlines/DY/v2/search/air-bounds"
 _IMPERSONATE = "chrome131"
-_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
 _COOKIE_MAX_AGE = 25 * 60  # Re-farm cookies after 25 minutes
 _DEBUG_PORT = 9460
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", ".norwegian_chrome_profile"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".norwegian_chrome_profile"
 )
 
 # Shared cookie farm state

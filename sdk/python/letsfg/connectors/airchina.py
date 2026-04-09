@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 _DEBUG_PORT = 9491
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".airchina_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".airchina_chrome_data"
 )
 
 
@@ -741,7 +741,7 @@ class AirChinaConnectorClient:
                 if not loaded:
                     logger.warning("AirChina: all URLs unreachable")
                     return self._empty(req)
-                await asyncio.sleep(random.uniform(4.0, 6.0))
+                await asyncio.sleep(random.uniform(2.0, 3.0))
                 
                 # Check for captcha on homepage
                 has_captcha = await page.evaluate(
@@ -770,9 +770,9 @@ class AirChinaConnectorClient:
                             return self._empty(req)
                 
                 # Human-like initial page interaction - simulate reading the page
-                for _ in range(random.randint(2, 4)):
+                for _ in range(random.randint(1, 2)):
                     await _random_scroll(page)
-                    await asyncio.sleep(random.uniform(0.5, 1.2))
+                    await asyncio.sleep(random.uniform(0.3, 0.6))
             
             # Move mouse around randomly
             for _ in range(random.randint(3, 6)):
@@ -802,25 +802,25 @@ class AirChinaConnectorClient:
                     }
                 }
             }""")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
 
             ok = await self._fill_airport(page, "origin", req.origin)
             if not ok:
                 return self._empty(req)
-            await asyncio.sleep(random.uniform(0.8, 1.2))
+            await asyncio.sleep(random.uniform(0.4, 0.6))
             
             # Close any open dropdown before filling destination
             await page.keyboard.press("Escape")
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.2)
 
             ok = await self._fill_airport(page, "destination", req.destination)
             if not ok:
                 return self._empty(req)
-            await asyncio.sleep(random.uniform(0.8, 1.2))
+            await asyncio.sleep(random.uniform(0.4, 0.6))
             
             # Close any open dropdown before clicking search
             await page.keyboard.press("Escape")
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.2)
             
             # Verify airports are correctly set (debug)
             form_state = await page.evaluate("""() => {
@@ -842,7 +842,7 @@ class AirChinaConnectorClient:
             }""")
             logger.info("AirChina: form verification - origin=%s dest=%s", 
                        form_state.get('origin', '?'), form_state.get('dest', '?'))
-            await asyncio.sleep(random.uniform(0.8, 1.5))
+            await asyncio.sleep(random.uniform(0.3, 0.5))
 
             ok = await self._fill_date(page, req)
             if not ok:
@@ -901,7 +901,7 @@ class AirChinaConnectorClient:
                 }""")
                 
             logger.info("AirChina: search clicked")
-            await asyncio.sleep(random.uniform(3.0, 4.5))  # Wait for page navigation
+            await asyncio.sleep(random.uniform(2.0, 3.0))  # Wait for page navigation
 
             # Check for error dialog
             error = await page.evaluate("""() => {
@@ -1087,7 +1087,7 @@ class AirChinaConnectorClient:
             
             # Human-like typing
             await _human_type(page, iata)
-            await asyncio.sleep(random.uniform(1.8, 3.0))
+            await asyncio.sleep(random.uniform(1.0, 1.5))
 
             # Move mouse randomly before clicking suggestion (human-like)
             await _random_scroll(page)

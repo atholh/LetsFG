@@ -106,9 +106,9 @@ _ORIGIN_TO_LOCALE: dict[str, str] = {
 
 logger = logging.getLogger(__name__)
 
-_DEBUG_PORT = 9451
+_DEBUG_PORT = 9505
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".etihad_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".etihad_chrome_data"
 )
 
 _browser = None

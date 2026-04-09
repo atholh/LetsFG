@@ -69,7 +69,7 @@ _TIMEZONES = [
 ]
 
 _VACANCIES_URL = "https://www.condor.com/tca/rest/us/vacancies"
-_IMPERSONATE = "chrome124"
+_IMPERSONATE = "chrome131"
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 _COOKIE_MAX_AGE = 25 * 60  # Re-farm cookies after 25 minutes
 

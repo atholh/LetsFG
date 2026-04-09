@@ -424,7 +424,7 @@ _DIRECT_AIRLINE_connectorS: list[tuple[str, type, float]] = [
     ("zipair_direct", ZipairConnectorClient, 25.0),
     ("condor_direct", CondorConnectorClient, 25.0),
     ("sunexpress_direct", SunExpressConnectorClient, 25.0),
-    ("volotea_direct", VoloteaConnectorClient, 25.0),
+    ("volotea_direct", VoloteaConnectorClient, 50.0),
     ("smartwings_direct", SmartwingsConnectorClient, 25.0),
     ("flybondi_direct", FlybondiConnectorClient, 25.0),
     ("jejuair_direct", JejuAirConnectorClient, 25.0),

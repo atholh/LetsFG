@@ -48,7 +48,7 @@ _MAX_ATTEMPTS = 3
 _API_WAIT = 30  # seconds to wait for availability API per attempt
 
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "..", ".azul_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), "..", ".azul_chrome_data"
 )
 
 # ── Persistent browser context (headed to bypass Akamai) ────────────────

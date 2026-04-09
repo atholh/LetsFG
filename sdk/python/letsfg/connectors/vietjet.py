@@ -71,7 +71,7 @@ _TIMEZONES = [
 ]
 
 # ── Shared browser singleton via CDP ────────────────────────────────────
-_CDP_PORT = 9465
+_CDP_PORT = 9515
 _chrome_proc = None
 _browser = None
 _browser_lock: Optional[asyncio.Lock] = None

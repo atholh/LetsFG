@@ -38,9 +38,9 @@ from .browser import find_chrome, stealth_popen_kwargs, _launched_procs, proxy_c
 
 logger = logging.getLogger(__name__)
 
-_DEBUG_PORT = 9455
+_DEBUG_PORT = 9510
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".ws_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".ws_chrome_data"
 )
 
 _browser = None

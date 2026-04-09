@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 _CDP_PORT = 9499
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".bookingcom_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".bookingcom_chrome_data"
 )
 
 _pw_instance = None
@@ -212,7 +212,7 @@ class BookingcomConnectorClient:
             offers: list[FlightOffer] = []
             check_count = 0
             while time.monotonic() < deadline:
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
                 check_count += 1
 
                 # Check API data

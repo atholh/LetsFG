@@ -1990,7 +1990,7 @@ class GenericCheckoutEngine:
             chrome_path = find_chrome()
             _udd_name = config.cdp_user_data_dir or f".{config.source_tag}_chrome_data"
             _user_data_dir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
+                os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")),
                 _udd_name,
             )
             os.makedirs(_user_data_dir, exist_ok=True)

@@ -66,7 +66,7 @@ _MARKET_MAP = {
 }
 
 # ── Shared browser singleton via CDP ────────────────────────────────────
-_CDP_PORT = 9461
+_CDP_PORT = 9513
 _chrome_proc = None
 _browser = None
 _browser_lock: Optional[asyncio.Lock] = None

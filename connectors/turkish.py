@@ -70,7 +70,7 @@ for _city, _apts in CITY_AIRPORTS.items():
 
 _DEBUG_PORT = 9453
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".tk_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".tk_chrome_data"
 )
 
 _browser = None

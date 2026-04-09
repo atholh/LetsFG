@@ -63,9 +63,9 @@ _SEARCH_API = (
     "https://api.finnair.com/d/fcom/instantsearch-prod"
     "/current/api/instantsearch/prices/flights"
 )
-_DEBUG_PORT = 9465
+_DEBUG_PORT = 9514
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", ".finnair_chrome_profile"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".finnair_chrome_profile"
 )
 _SESSION_MAX_AGE = 20 * 60  # Re-establish session every 20 min
 

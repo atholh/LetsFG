@@ -40,9 +40,9 @@ logger = logging.getLogger(__name__)
 
 _BASE = "https://www.onthebeach.co.uk"
 _FLIGHTS_URL = f"{_BASE}/flights"
-_CDP_PORT = 9498
+_CDP_PORT = 9522
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".onthebeach_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".onthebeach_chrome_data"
 )
 
 _pw_instance = None

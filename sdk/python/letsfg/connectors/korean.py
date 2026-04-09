@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 _DEBUG_PORT = 9478
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".korean_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".korean_chrome_data"
 )
 
 # Module-level browser state (reused across searches)

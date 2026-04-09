@@ -45,7 +45,7 @@ from .browser import find_chrome, stealth_popen_kwargs, _launched_procs, get_cur
 logger = logging.getLogger(__name__)
 
 _SCHEDULE_URL = "https://json.volotea.com/dist/schedule/{route}_schedule.json"
-_IMPERSONATE = "chrome124"
+_IMPERSONATE = "chrome131"
 
 _VIEWPORTS = [
     {"width": 1366, "height": 768},
@@ -56,7 +56,7 @@ _VIEWPORTS = [
 
 _DEBUG_PORT = 9461
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", ".volotea_chrome_profile"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".volotea_chrome_profile"
 )
 _pw_instance = None
 _browser = None
@@ -302,10 +302,8 @@ class VoloteaConnectorClient:
                             if key.upper() == reverse_key.upper():
                                 ib_flights_list = data[key]
                                 break
-                if not ib_flights_list:
-                    continue
-                # Already tried above, skip duplicate attempts
-                break
+                if ib_flights_list:
+                    break
 
         return []
 
@@ -494,10 +492,10 @@ class VoloteaConnectorClient:
             )
             # Wait for Incapsula challenge to pass and Angular to render
             for _wait in range(10):
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.0)
                 if await page.locator("input").count() > 3:
                     break
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
             # Step 2: Dismiss cookies
             await self._dismiss_cookies(page)

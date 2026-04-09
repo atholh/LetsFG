@@ -138,7 +138,7 @@ class ZipairConnectorClient:
         }
 
         logger.info("Zipair: API %s→%s on %s", req.origin, req.destination, dep_str)
-        sess = creq.Session(impersonate="chrome124")
+        sess = creq.Session(impersonate="chrome131")
         try:
             r = sess.get(_BFF_URL, params=params, headers={
                 "Accept": "application/json",

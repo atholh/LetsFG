@@ -37,9 +37,9 @@ logger = logging.getLogger(__name__)
 
 _BASE = "https://www.auntbetty.com.au"
 _BOOKING = "https://booking.auntbetty.com"
-_CDP_PORT = 9491
+_CDP_PORT = 9517
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".auntbetty_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".auntbetty_chrome_data"
 )
 
 _pw_instance = None

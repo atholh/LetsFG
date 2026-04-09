@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 _DEBUG_PORT = 9470
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", ".ita_chrome_profile"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".ita_chrome_profile"
 )
 
 _pw_instance = None

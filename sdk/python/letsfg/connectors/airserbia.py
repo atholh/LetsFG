@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 _DEBUG_PORT = 9497
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".airserbia_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".airserbia_chrome_data"
 )
 
 _browser = None
@@ -301,10 +301,10 @@ class AirSerbiaConnectorClient:
                 cur_url = page.url
                 if "booking.airserbia.com" in cur_url or "flight-selection" in cur_url:
                     # On booking page — wait for flight data to load
-                    await asyncio.sleep(8.0)
+                    await asyncio.sleep(3.0)
                     break
                 if any(k in cur_url.lower() for k in ["result", "search", "availability"]):
-                    await asyncio.sleep(4.0)
+                    await asyncio.sleep(2.0)
                     break
                 await asyncio.sleep(1.0)
 
@@ -314,7 +314,7 @@ class AirSerbiaConnectorClient:
                     for pg in bctx.pages:
                         if "booking.airserbia.com" in pg.url and pg != page:
                             pg.on("response", _on_response)
-                            await asyncio.sleep(5.0)
+                            await asyncio.sleep(2.0)
 
             if not api_event.is_set():
                 try:
@@ -559,7 +559,7 @@ class AirSerbiaConnectorClient:
         return datetime.now()
 
     async def _scrape_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
-        await asyncio.sleep(3)
+        await asyncio.sleep(1.5)
         flights = await page.evaluate(r"""(params) => {
             const [origin, destination] = params;
             const results = [];

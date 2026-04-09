@@ -40,9 +40,9 @@ from .browser import find_chrome, stealth_popen_kwargs, _launched_procs, proxy_c
 
 logger = logging.getLogger(__name__)
 
-_DEBUG_PORT = 9499
+_DEBUG_PORT = 9520
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".mea_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".mea_chrome_data"
 )
 
 _browser = None
@@ -226,7 +226,7 @@ class MEAConnectorClient:
         try:
             logger.info("MEA: loading homepage for %s→%s", req.origin, req.destination)
             await page.goto(self.HOMEPAGE, wait_until="load", timeout=30000)
-            await asyncio.sleep(6.0)
+            await asyncio.sleep(2.5)
             await _dismiss_overlays(page)
 
             # One-way toggle
@@ -249,7 +249,7 @@ class MEAConnectorClient:
                 const btn = document.querySelector('.bookATripForm button.roundedButton');
                 if (btn) btn.click();
             }""")
-            await asyncio.sleep(3.0)
+            await asyncio.sleep(1.5)
             logger.info("MEA: Continue clicked, popup opening")
 
             # Fill date in the Swiper calendar popup
@@ -276,7 +276,7 @@ class MEAConnectorClient:
                     break
                 url = page.url
                 if "digital.mea.com.lb" in url:
-                    await asyncio.sleep(5.0)
+                    await asyncio.sleep(2.0)
                     break
                 await asyncio.sleep(1.0)
 
@@ -505,7 +505,7 @@ class MEAConnectorClient:
 
     async def _scrape_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
         """Fallback: scrape flight data from refx web components on the booking page."""
-        await asyncio.sleep(3)
+        await asyncio.sleep(1.5)
         flights = await page.evaluate(r"""(params) => {
             const [origin, destination] = params;
             const results = [];

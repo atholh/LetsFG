@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 _DEBUG_PORT = 9503
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".level_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".level_chrome_data"
 )
 
 _browser = None
@@ -223,7 +223,7 @@ class LevelConnectorClient:
 
             logger.info("Level: loading homepage for %s→%s on %s", req.origin, req.destination, date_str)
             await page.goto(self.HOMEPAGE, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(3.0)
+            await asyncio.sleep(1.0)
             await _dismiss_overlays(page)
 
             # ── Direct API call via page context ──

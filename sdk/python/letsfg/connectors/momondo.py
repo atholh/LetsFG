@@ -142,7 +142,7 @@ class MomondoConnectorClient:
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
+                    "Chrome/135.0.0.0 Safari/537.36"
                 ),
             )
             page = await ctx.new_page()
@@ -164,7 +164,7 @@ class MomondoConnectorClient:
             # Momondo progressively polls for results (multiple poll rounds)
             for _ in range(10):
                 await page.wait_for_timeout(3000)
-                if len(api_responses) >= 2:
+                if len(api_responses) >= 3:
                     # Wait for more poll rounds
                     await page.wait_for_timeout(5000)
                     break

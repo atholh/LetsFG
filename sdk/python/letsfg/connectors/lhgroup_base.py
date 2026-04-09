@@ -195,7 +195,7 @@ class LHGroupBaseConnector:
 
         origin_slug = IATA_TO_SLUG.get(req.origin)
         dest_slug = IATA_TO_SLUG.get(req.destination)
-        if not origin_slug or not dest_slug or origin_slug == dest_slug:
+        if not origin_slug or not dest_slug:
             return self._empty(req)
 
         url = f"{_BASE_URL}/flight-{origin_slug}-{dest_slug}"

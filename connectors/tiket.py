@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 _CDP_PORT = 9483
 _USER_DATA = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".tiket_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".tiket_chrome_data"
 )
 
 _browser = None

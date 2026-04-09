@@ -40,7 +40,7 @@ _BASE = "https://www.yatra.com"
 _FLIGHT_API = "https://flight.yatra.com"
 _CDP_PORT = 9469
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".yatra_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".yatra_chrome_data"
 )
 
 # Major Indian airports for domestic/international endpoint selection

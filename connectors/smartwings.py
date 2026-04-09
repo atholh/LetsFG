@@ -60,9 +60,9 @@ _TIMEZONES = [
 _MAX_ATTEMPTS = 2
 
 # ── CDP Chrome singleton (headed, no --headless) ──────────────────────
-_CDP_PORT = 9452
+_CDP_PORT = 9507
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", ".smartwings_chrome_profile"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".smartwings_chrome_profile"
 )
 
 _chrome_proc: subprocess.Popen | None = None

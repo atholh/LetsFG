@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 _BASE = "https://apk-ports.hosting.aero"
 _AVAIL_URL = f"{_BASE}/ibe/availability"
 _HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
@@ -183,8 +183,8 @@ class AirPeaceConnectorClient:
             origin=req.origin,
             destination=req.destination,
             currency="USD",
-            offers=outbound_offers,
-            total_results=len(outbound_offers),
+            offers=offers,
+            total_results=len(offers),
         )
 
     def _parse_html(self, html: str, req: FlightSearchRequest) -> list[FlightOffer]:

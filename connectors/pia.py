@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 _BASE = "https://pia-ports.hosting.aero"
 _AVAIL_URL = f"{_BASE}/ibe/availability"
 _HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
@@ -194,7 +194,7 @@ class PiaConnectorClient:
         """Parse one availability-flight-table section into offers."""
         offers: list[FlightOffer] = []
 
-        parts = re.split(r'<div[^>]*class="js-journey"', html)
+        parts = re.split(r'<div[^>]*class="js-journey"', section_html)
 
         for part in parts[1:]:
             dur_attr = re.search(r'data-journey-duration="(\d+)"', part)

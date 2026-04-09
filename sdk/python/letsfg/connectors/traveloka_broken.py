@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 _CDP_PORT = 9480
 _USER_DATA = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".traveloka_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".traveloka_chrome_data"
 )
 
 _browser = None

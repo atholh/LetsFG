@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 _DEBUG_PORT = 9462
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".singapore_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".singapore_chrome_data"
 )
 
 _browser = None
@@ -234,7 +234,7 @@ class SingaporeConnectorClient:
                 wait_until="domcontentloaded",
                 timeout=45000,
             )
-            await asyncio.sleep(8.0)
+            await asyncio.sleep(3.0)
             await _dismiss_overlays(page)
             await asyncio.sleep(0.5)
 
@@ -323,15 +323,15 @@ class SingaporeConnectorClient:
                     logger.info("Singapore: reached results page: %s", url[:150])
                     # Wait for flights to actually render (SPA lazy-loads)
                     for wait_i in range(10):
-                        await asyncio.sleep(3.0)
+                        await asyncio.sleep(1.5)
                         has_flights = await page.evaluate("""() => {
                             const text = document.body?.innerText || '';
                             return text.includes('SQ ') || text.includes('Economy') ||
                                    text.includes('Business') || text.includes('Premium Economy');
                         }""")
                         if has_flights:
-                            logger.info("Singapore: flight content detected after %ds", (wait_i + 1) * 3)
-                            await asyncio.sleep(3.0)
+                            logger.info("Singapore: flight content detected after %ds", int((wait_i + 1) * 1.5))
+                            await asyncio.sleep(1.5)
                             break
                     got_results = True
                     break
@@ -340,13 +340,13 @@ class SingaporeConnectorClient:
                 if "Select Flight" in title:
                     logger.info("Singapore: results detected by title: %s", title)
                     for wait_i in range(10):
-                        await asyncio.sleep(3.0)
+                        await asyncio.sleep(1.5)
                         has_flights = await page.evaluate("""() => {
                             const text = document.body?.innerText || '';
                             return text.includes('SQ ') || text.includes('Economy');
                         }""")
                         if has_flights:
-                            await asyncio.sleep(3.0)
+                            await asyncio.sleep(1.5)
                             break
                     got_results = True
                     break

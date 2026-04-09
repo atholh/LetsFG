@@ -387,25 +387,25 @@ class AmericanConnectorClient:
 
             # -- Select One way trip type ------------------------------
             await self._select_one_way(page)
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.15)
 
             # -- Fill origin -------------------------------------------
             ok = await self._fill_airport(page, "Departure airport", req.origin)
             if not ok:
                 logger.warning("American: origin fill failed")
                 return None
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.2)
 
             # -- Fill destination --------------------------------------
             ok = await self._fill_airport(page, "Arrival airport", req.destination)
             if not ok:
                 logger.warning("American: destination fill failed")
                 return None
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.2)
 
             # -- Fill departure date -----------------------------------
             await self._fill_date(page, req)
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.15)
 
             # -- Click Search ------------------------------------------
             search_btn = page.get_by_role("button", name="Search").first
@@ -416,13 +416,13 @@ class AmericanConnectorClient:
                 "**/booking/choose-flights/**", timeout=_RESULTS_WAIT * 1000
             )
             # Wait for ng-state to appear (Angular SSR embeds it once hydrated)
-            for _ in range(10):
+            for _ in range(15):
                 has_ng = await page.evaluate(
                     "() => !!document.getElementById('ng-state')"
                 )
                 if has_ng:
                     break
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
 
             # -- Extract ng-state transfer state -----------------------
             data = await self._extract_ng_state(page)

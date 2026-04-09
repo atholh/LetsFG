@@ -76,7 +76,7 @@ _CHROME_FLAGS = [
     "--window-size=1366,768",
 ]
 
-_CDP_PORT = 9460
+_CDP_PORT = 9512
 _chrome_proc: Optional[subprocess.Popen] = None
 _browser = None
 _pw_instance = None

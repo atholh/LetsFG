@@ -176,7 +176,7 @@ class RwandAirConnectorClient:
         )
 
     def _fetch_sync(self, url: str) -> str | None:
-        sess = creq.Session(impersonate="chrome124")
+        sess = creq.Session(impersonate="chrome131")
         try:
             r = sess.get(url, headers=_HEADERS, timeout=int(self.timeout))
             if r.status_code != 200:

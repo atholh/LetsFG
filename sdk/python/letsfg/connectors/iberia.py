@@ -117,7 +117,7 @@ def _load_market_fares_sync(market: str) -> dict[str, tuple[float, str, str]]:
         return {}
 
     url = f"{_BASE}/{path}"
-    sess = creq.Session(impersonate="chrome124")
+    sess = creq.Session(impersonate="chrome131")
     try:
         r = sess.get(url, headers=_HEADERS, timeout=20)
         if r.status_code != 200:

@@ -80,7 +80,7 @@ _TIMEZONES = [
 
 _MAX_ATTEMPTS = 2
 _DEBUG_PORT = 9448
-_USER_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".scoot_chrome_data")
+_USER_DATA_DIR = os.path.join(os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".scoot_chrome_data")
 
 _pw_instance = None
 _browser = None
@@ -413,7 +413,7 @@ class ScootConnectorClient:
             try:
                 await page.goto("https://www.flyscoot.com/en",
                                 wait_until="domcontentloaded", timeout=15000)
-                await asyncio.sleep(3)
+                await asyncio.sleep(1.5)
                 await self._dismiss_cookies(page)
             except Exception:
                 pass  # main site may timeout — we just need the cookies
@@ -423,7 +423,7 @@ class ScootConnectorClient:
                         req.origin, req.destination)
             await page.goto("https://booking.flyscoot.com",
                             wait_until="domcontentloaded", timeout=20000)
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
 
             # Accept cookies on booking site too
             await self._dismiss_cookies(page)
@@ -431,14 +431,14 @@ class ScootConnectorClient:
             # Wait for SPA to render (use JS to check for visible input — avoids
             # the duplicate-ID trap where wait_for_selector picks the hidden one)
             spa_ready = False
-            for _wait_round in range(6):  # up to ~30s total
+            for _wait_round in range(6):  # up to ~12s total
                 spa_ready = await page.evaluate("""() => {
                     const inputs = document.querySelectorAll('input#originStation');
                     return Array.from(inputs).some(i => i.offsetHeight > 0);
                 }""")
                 if spa_ready:
                     break
-                await asyncio.sleep(5)
+                await asyncio.sleep(2)
             if not spa_ready:
                 logger.warning("Scoot: search form never appeared")
                 return None

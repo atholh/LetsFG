@@ -36,9 +36,9 @@ from .browser import find_chrome, stealth_popen_kwargs, _launched_procs
 logger = logging.getLogger(__name__)
 
 _BASE = "https://www.traveltrolley.co.uk"
-_CDP_PORT = 9497
+_CDP_PORT = 9519
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".traveltrolley_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".traveltrolley_chrome_data"
 )
 
 _pw_instance = None

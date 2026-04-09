@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 _DEBUG_PORT = 9496
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".airtransat_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".airtransat_chrome_data"
 )
 
 _browser = None

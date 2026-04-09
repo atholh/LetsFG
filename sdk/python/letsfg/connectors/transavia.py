@@ -74,7 +74,7 @@ _AVAILABILITY_URL = "https://www.transavia.com/start/api/flight-availability"
 _IMPERSONATE = "chrome131"
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
 )
 _COOKIE_MAX_AGE = 25 * 60  # Re-farm cookies after 25 minutes
 
@@ -84,9 +84,9 @@ _farmed_cookies: list[dict] = []
 _farm_timestamp: float = 0.0
 
 # ── CDP Chrome singleton (headed, no --headless) ─────────────────────────
-_CDP_PORT = 9453
+_CDP_PORT = 9508
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", ".transavia_chrome_profile"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".transavia_chrome_profile"
 )
 
 _chrome_proc: subprocess.Popen | None = None

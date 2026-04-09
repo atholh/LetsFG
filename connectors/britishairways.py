@@ -137,7 +137,6 @@ class BritishAirwaysConnectorClient:
 
         fq = (
             f"departure_city:{dep_city}+AND+"
-            f"departure_country_code:*GB*+AND+"
             f"arrival_city:{arr_city}+AND+"
             f"trip_type:{trip_type}+AND+"
             f"cabin:M+AND+"
@@ -198,7 +197,7 @@ class BritishAirwaysConnectorClient:
         return offers
 
     def _fetch_solr_sync(self, url: str) -> dict | None:
-        sess = creq.Session(impersonate="chrome124")
+        sess = creq.Session(impersonate="chrome131")
         try:
             r = sess.get(url, headers=_HEADERS, timeout=int(self.timeout))
             if r.status_code != 200:

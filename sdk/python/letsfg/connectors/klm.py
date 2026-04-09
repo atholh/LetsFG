@@ -136,7 +136,7 @@ def _load_slug_cache_sync() -> None:
     if _slug_cache_loaded:
         return
     try:
-        sess = creq.Session(impersonate="chrome124")
+        sess = creq.Session(impersonate="chrome131")
         r = sess.post(
             _AIRPORT_API,
             json={"language": "en", "siteEdition": _SITE_EDITION},
@@ -278,7 +278,7 @@ class KlmConnectorClient:
         )
 
     def _fetch_sync(self, url: str) -> str | None:
-        sess = creq.Session(impersonate="chrome124")
+        sess = creq.Session(impersonate="chrome131")
         try:
             r = sess.get(url, headers=_HEADERS, timeout=int(self.timeout))
             if r.status_code != 200:

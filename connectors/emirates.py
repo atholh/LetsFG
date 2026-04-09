@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 _DEBUG_PORT = 9457
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".emirates_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".emirates_chrome_data"
 )
 
 _browser = None
@@ -334,7 +334,7 @@ class EmiratesConnectorClient:
                 wait_until="domcontentloaded",
                 timeout=45000,
             )
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(2.0)
             await _dismiss_overlays(page)
             await asyncio.sleep(0.5)
 
@@ -344,7 +344,7 @@ class EmiratesConnectorClient:
             try:
                 direct_url = self._build_direct_results_url(req)
                 await page.goto(direct_url, wait_until="domcontentloaded", timeout=45000)
-                await asyncio.sleep(6.0)
+                await asyncio.sleep(3.0)
                 if "search-results" in page.url:
                     direct_bootstrap_ok = True
                     logger.warning("Emirates: direct results bootstrap succeeded")
@@ -373,7 +373,7 @@ class EmiratesConnectorClient:
                     logger.warning("Emirates: airport fill failed, trying direct results URL fallback")
                     direct_url = self._build_direct_results_url(req)
                     await page.goto(direct_url, wait_until="domcontentloaded", timeout=45000)
-                    await asyncio.sleep(5.0)
+                    await asyncio.sleep(2.5)
                 else:
                     # Step 4: Select date(s)
                     try:
@@ -387,7 +387,7 @@ class EmiratesConnectorClient:
                         logger.warning("Emirates: outbound date selection failed, trying direct results URL fallback")
                         direct_url = self._build_direct_results_url(req)
                         await page.goto(direct_url, wait_until="domcontentloaded", timeout=45000)
-                        await asyncio.sleep(5.0)
+                        await asyncio.sleep(2.5)
                     else:
                         if req.return_from is not None:
                             try:
@@ -401,7 +401,7 @@ class EmiratesConnectorClient:
                                 logger.warning("Emirates: return date selection failed, trying direct results URL fallback")
                                 direct_url = self._build_direct_results_url(req)
                                 await page.goto(direct_url, wait_until="domcontentloaded", timeout=45000)
-                                await asyncio.sleep(5.0)
+                                await asyncio.sleep(2.5)
                             else:
                                 # Step 5: Click "Search flights"
                                 await page.evaluate("""() => {
@@ -442,7 +442,7 @@ class EmiratesConnectorClient:
                     break
                 if "search-results" in url:
                     # Wait for flight data to load
-                    await asyncio.sleep(6.0)
+                    await asyncio.sleep(3.0)
                     got_results = True
                     break
                 if not logged_url and time.monotonic() > deadline - remaining + 5:
@@ -461,7 +461,7 @@ class EmiratesConnectorClient:
                         direct_url = self._build_direct_results_url(req)
                         logger.warning("Emirates: forcing direct results recovery")
                         await page.goto(direct_url, wait_until="domcontentloaded", timeout=45000)
-                        await asyncio.sleep(6.0)
+                        await asyncio.sleep(3.0)
                         if "search-results" in page.url:
                             got_results = True
                             break

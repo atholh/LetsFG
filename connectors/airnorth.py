@@ -127,7 +127,7 @@ class AirnorthConnectorClient:
     # ------------------------------------------------------------------
 
     def _fetch_sync(self, req: FlightSearchRequest) -> str | None:
-        sess = creq.Session(impersonate="chrome124")
+        sess = creq.Session(impersonate="chrome131")
         try:
             # Step 1: GET search page for CSRF token + cookies
             r1 = sess.get(_SEARCH_URL, headers=_HEADERS, timeout=int(self.timeout))

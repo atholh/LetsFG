@@ -190,7 +190,7 @@ async def _get_browser():
             popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
 
         _chrome_proc = subprocess.Popen(args, **popen_kw)
-        await asyncio.sleep(2.5)
+        await asyncio.sleep(1.0)
 
         _browser = await _pw_instance.chromium.connect_over_cdp(
             f"http://127.0.0.1:{_CDP_PORT}"
@@ -384,7 +384,7 @@ class DeltaConnectorClient:
                     form_type = "modern"
                     break
                 await asyncio.sleep(1)
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(0.4)
 
             if form_type == "none":
                 logger.warning("Delta: no booking form found after 20s")
@@ -456,7 +456,7 @@ class DeltaConnectorClient:
                 return None
 
             # Give a moment for any additional responses
-            await asyncio.sleep(3.0)
+            await asyncio.sleep(0.5)
 
             # Parse the captured API response
             if not api_response_body:
@@ -517,7 +517,7 @@ class DeltaConnectorClient:
             link_id = "fromAirportName" if field_type == "origin" else "toAirportName"
             link = page.locator(f"#{link_id}")
             await link.click(timeout=5000)
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(0.6)
 
             # Modal opens with #search_input
             search_input = page.locator("#search_input")
@@ -525,7 +525,7 @@ class DeltaConnectorClient:
             await search_input.fill("")
             await asyncio.sleep(0.2)
             await search_input.press_sequentially(iata, delay=120)
-            await asyncio.sleep(2.5)
+            await asyncio.sleep(0.5)
 
             # Click matching airport link in the modal popup
             airport_link = page.locator(
@@ -548,7 +548,7 @@ class DeltaConnectorClient:
             # Open the calendar
             cal_trigger = page.locator("#input_departureDate_1")
             await cal_trigger.click(timeout=5000)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
 
             # Navigate to the correct month
             for _ in range(12):
@@ -652,7 +652,7 @@ class DeltaConnectorClient:
             await inp.fill("")
             await asyncio.sleep(0.2)
             await inp.press_sequentially(iata, delay=100)
-            await asyncio.sleep(2.5)
+            await asyncio.sleep(0.5)
 
             # Click the matching suggestion
             opt = page.locator("[role='option']").filter(has_text=iata).first
@@ -676,7 +676,7 @@ class DeltaConnectorClient:
             # Click the date picker trigger
             date_trigger = page.locator("mach-date-picker").first
             await date_trigger.click(timeout=5000)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
 
             # Navigate forward in the calendar
             for _ in range(12):

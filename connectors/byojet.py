@@ -38,9 +38,9 @@ logger = logging.getLogger(__name__)
 
 _BASE = "https://www.byojet.com"
 _HOME = "https://home.byojet.com"
-_CDP_PORT = 9468
+_CDP_PORT = 9516
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".byojet_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".byojet_chrome_data"
 )
 
 _pw_instance = None

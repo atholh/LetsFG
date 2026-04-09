@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 _BUDGETAIR_BASE = "https://www.budgetair.co.uk"
 _CDP_PORT = 9466
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".travix_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".travix_chrome_data"
 )
 
 _pw_instance = None

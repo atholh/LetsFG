@@ -162,7 +162,7 @@ class AlmosaferConnectorClient:
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
+                    "Chrome/135.0.0.0 Safari/537.36"
                 ),
             )
             page = await ctx.new_page()
@@ -187,8 +187,9 @@ class AlmosaferConnectorClient:
             for _ in range(20):
                 await page.wait_for_timeout(2500)
 
-                # Parse flight data from async-search-result
-                for data in api_data:
+                # Parse flight data from async-search-result — drain to avoid re-parsing
+                batch, api_data[:] = list(api_data), []
+                for data in batch:
                     res = data.get("res")
                     if not isinstance(res, list):
                         continue

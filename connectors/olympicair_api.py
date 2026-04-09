@@ -113,7 +113,7 @@ class OlympicAirConnectorClient:
             f"&SelectedReturnDate="
             f"&Type=Fares"
         )
-        session = creq.Session(impersonate="chrome124", headers=_HEADERS)
+        session = creq.Session(impersonate="chrome131", headers=_HEADERS)
         response = session.get(url, timeout=self.timeout)
         if response.status_code != 200:
             raise RuntimeError(f"HTTP {response.status_code}")

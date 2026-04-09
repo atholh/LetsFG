@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 # ── CDP Chrome singleton ──
 _DEBUG_PORT = 9452
-_USER_DATA_DIR = os.path.join(os.getcwd(), ".skyscanner_chrome_data")
+_USER_DATA_DIR = os.path.join(os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".skyscanner_chrome_data")
 _browser = None
 _chrome_proc = None
 _pw_instance = None
@@ -265,7 +265,7 @@ class SkyscannerConnectorClient:
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
+                    "Chrome/135.0.0.0 Safari/537.36"
                 ),
             )
             page = await ctx.new_page()

@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 _DEBUG_PORT = 9481
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".saudia_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".saudia_chrome_data"
 )
 
 _browser = None
@@ -298,7 +298,7 @@ class SaudiaConnectorClient:
             # Step 1: Load homepage
             logger.info("Saudia: loading homepage for %s→%s", req.origin, req.destination)
             await page.goto("https://www.saudia.com/en-SA", wait_until="domcontentloaded", timeout=40000)
-            await asyncio.sleep(6.0)
+            await asyncio.sleep(2.5)
 
             # Inject XHR capture + dismiss overlays
             await page.evaluate(_XHR_CAPTURE_SCRIPT)
@@ -363,7 +363,7 @@ class SaudiaConnectorClient:
                     if (btn) btn.click();
                 }""")
             logger.info("Saudia: search clicked")
-            await asyncio.sleep(3.0)
+            await asyncio.sleep(1.5)
 
             # Step 7: Dismiss "Terminal Changes" modal (click Continue)
             for _ in range(3):

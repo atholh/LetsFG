@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 _CDP_PORT = 9463
 _USER_DATA_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".spirit_chrome_data"
+    os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")), ".spirit_chrome_data"
 )
 
 _SUB_KEY = "3b6a6994753b4efc86376552e52b8432"

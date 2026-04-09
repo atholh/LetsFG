@@ -117,7 +117,7 @@ class SkyExpressConnectorClient:
         if calendar_payload is not None and routes_payload is not None:
             return calendar_payload, routes_payload
 
-        session = creq.Session(impersonate="chrome124", headers=_HEADERS)
+        session = creq.Session(impersonate="chrome131", headers=_HEADERS)
         if calendar_payload is None:
             response = session.get(_CALENDAR_URL, timeout=self.timeout)
             if response.status_code != 200:

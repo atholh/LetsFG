@@ -44,7 +44,7 @@ _GQL_URL = "https://api.qantas.com/market-pricing/mpp-graphql/v1/graphql"
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+        "(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
     ),
     "Content-Type": "application/json",
     "Origin": "https://www.qantas.com",

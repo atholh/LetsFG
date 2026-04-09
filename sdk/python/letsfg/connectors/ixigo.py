@@ -99,7 +99,7 @@ class IxigoConnectorClient:
     async def _do_search(
         self, req: FlightSearchRequest
     ) -> list[FlightOffer] | None:
-        from .browser import get_proxy, launch_headed_browser, inject_stealth_js, auto_block_if_proxied
+        from playwright.async_api import async_playwright
 
         stream_data: list[dict] = []
 
@@ -133,20 +133,32 @@ class IxigoConnectorClient:
             except Exception:
                 pass
 
-        proxy = get_proxy("IXIGO_PROXY")
-        browser = await launch_headed_browser(proxy=proxy)
+        pw = await async_playwright().start()
         try:
+            from .browser import get_proxy
+            proxy = get_proxy("IXIGO_PROXY")
+            launch_kw: dict = {
+                "headless": False,
+                "args": [
+                    "--window-position=-2400,-2400",
+                    "--window-size=1366,768",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            }
+            if proxy:
+                launch_kw["proxy"] = proxy
+            browser = await pw.chromium.launch(**launch_kw)
             ctx = await browser.new_context(
                 viewport={"width": 1366, "height": 768},
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
+                    "Chrome/135.0.0.0 Safari/537.36"
                 ),
             )
             page = await ctx.new_page()
-            await inject_stealth_js(page)
             if proxy:
+                from .browser import auto_block_if_proxied
                 await auto_block_if_proxied(page)
             page.on("response", on_response)
 
@@ -179,6 +191,11 @@ class IxigoConnectorClient:
         except Exception as e:
             logger.error("IXIGO browser error: %s", e)
             return None
+        finally:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
 
         if not stream_data:
             logger.warning("IXIGO: no SSE stream captured")
