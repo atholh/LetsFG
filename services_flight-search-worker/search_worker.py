@@ -307,6 +307,7 @@ async def run_search(params: dict) -> dict:
     callback_url = params["callback_url"]
     callback_meta = params["callback_meta"]
     adults = int(params.get("adults", 1))
+    children = int(params.get("children", 0))
     currency = params.get("currency", "EUR")
     limit = int(params.get("limit", 30))
     max_stops = params.get("max_stops")
@@ -319,7 +320,7 @@ async def run_search(params: dict) -> dict:
         return await _run_round_trip(
             origin, destination, date_from, return_date,
             callback_url, callback_meta,
-            adults, currency, limit, t0, max_stops,
+            adults, children, currency, limit, t0, max_stops,
         )
 
     # ── One-way search (original flow) ──────────────────────────────────
@@ -330,6 +331,7 @@ async def run_search(params: dict) -> dict:
         try:
             api_result = await _search_api(
                 origin, destination, date_from, adults, currency, limit,
+                children=children,
             )
             api_offers = api_result.get("offers", [])
             elapsed = time.monotonic() - t0
@@ -355,6 +357,7 @@ async def run_search(params: dict) -> dict:
     try:
         local_result = await _search_local(
             origin, destination, date_from, adults, currency, limit,
+            children=children,
         )
         local_offers = local_result.get("offers", [])
         elapsed = time.monotonic() - t0
@@ -399,7 +402,7 @@ async def _run_round_trip(
     origin: str, destination: str,
     date_from: str, return_date: str,
     callback_url: str, callback_meta: dict,
-    adults: int, currency: str, limit: int,
+    adults: int, children: int, currency: str, limit: int,
     t0: float, max_stops: int | None = None,
 ) -> dict:
     """Fire outbound + return searches in parallel, then build combos.
@@ -422,7 +425,7 @@ async def _run_round_trip(
             # together, yielding significantly cheaper fares than two one-ways.
             api_rt_task = _search_api(
                 origin, destination, date_from, adults, currency, limit * 2,
-                return_date=return_date,
+                return_date=return_date, children=children,
             )
             api_rt_res = await asyncio.gather(api_rt_task, return_exceptions=True)
             api_rt_res = api_rt_res[0]
@@ -457,12 +460,12 @@ async def _run_round_trip(
     rt_aggregator_offers: list[dict] = []
     try:
         # One-way fan-outs for combo engine (direct airlines only, exclude RT-capable)
-        out_local_task = _search_local(origin, destination, date_from, adults, currency, limit * 2)
-        ret_local_task = _search_local(destination, origin, return_date, adults, currency, limit * 2)
+        out_local_task = _search_local(origin, destination, date_from, adults, currency, limit * 2, children=children)
+        ret_local_task = _search_local(destination, origin, return_date, adults, currency, limit * 2, children=children)
         # Native RT fan-out for aggregators (Skyscanner, Kayak, CheapFlights, Momondo, Kiwi)
         rt_local_task = _search_local(
             origin, destination, date_from, adults, currency, limit * 2,
-            return_date=return_date, only_rt_capable=True,
+            return_date=return_date, only_rt_capable=True, children=children,
         )
         out_local_res, ret_local_res, rt_local_res = await asyncio.gather(
             out_local_task, ret_local_task, rt_local_task,
@@ -610,6 +613,7 @@ async def _search_api(
     max_stopovers: int | None = None,
     return_date: str | None = None,
     cabin_class: str | None = None,
+    children: int = 0,
 ) -> dict:
     """Search via LetsFG API — Duffel, Amadeus, Sabre (400+ airlines).
 
@@ -631,6 +635,8 @@ async def _search_api(
         body["return_from"] = return_date
     if cabin_class:
         body["cabin_class"] = cabin_class
+    if children:
+        body["children"] = children
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             f"{LETSFG_BASE_URL}/api/v1/flights/search",
@@ -655,6 +661,7 @@ async def _search_local(
     return_date: str | None = None,
     only_rt_capable: bool = False,
     cabin_class: str | None = None,
+    children: int = 0,
 ) -> dict:
     """Fan out search to individual connector-worker Cloud Run instances.
 
@@ -718,6 +725,8 @@ async def _search_local(
             "sibling_pairs": sibling_pairs,
             "all_pairs": all_pairs,
         }
+        if children:
+            payload["children"] = children
         if return_date:
             payload["return_date"] = return_date
         if cabin_class:
