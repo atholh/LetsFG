@@ -300,7 +300,7 @@ class JetstarConnectorClient:
                         wait_until="domcontentloaded",
                         timeout=20000,
                     )
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(3)
                     warmup_title = await page.title()
                     logger.info("Jetstar: warm-up page title: %s", warmup_title)
                     _warmup_done = True

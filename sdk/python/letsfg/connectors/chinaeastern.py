@@ -240,7 +240,7 @@ class ChinaEasternConnectorClient:
         try:
             logger.info("ChinaEastern: loading homepage for %s→%s", req.origin, req.destination)
             await page.goto(self.HOMEPAGE, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(3.0)
             await _dismiss_overlays(page)
 
             # Switch to International tab (defaults to domestic)
@@ -321,7 +321,7 @@ class ChinaEasternConnectorClient:
                     search_data.clear()
                     api_event.clear()
                     await page.goto(fixed_url, wait_until="domcontentloaded", timeout=30000)
-                    await asyncio.sleep(6.0)  # wait for briefInfo to fire on correct date
+                    await asyncio.sleep(4.0)  # wait for briefInfo to fire on correct date
 
             remaining = max(self.timeout - (time.monotonic() - t0), 15)
             deadline = time.monotonic() + remaining
@@ -330,7 +330,7 @@ class ChinaEasternConnectorClient:
                     break
                 url = page.url
                 if any(k in url.lower() for k in ["result", "search", "flight", "availability", "shopping"]):
-                    await asyncio.sleep(6.0)
+                    await asyncio.sleep(4.0)
                     break
                 await asyncio.sleep(1.0)
 

@@ -229,7 +229,7 @@ class QatarConnectorClient:
                     wait_until="domcontentloaded",
                     timeout=25000,
                 )
-                await asyncio.sleep(6)
+                await asyncio.sleep(3)
                 _homepage_warmed = True
             else:
                 # Reuse same page context — just go to homepage quickly

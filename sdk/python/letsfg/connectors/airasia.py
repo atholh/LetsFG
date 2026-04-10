@@ -190,7 +190,7 @@ class AirAsiaConnectorClient:
     async def _extract_from_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
         """Fallback: extract from __NEXT_DATA__ or re-parsed script tags."""
         try:
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
             data = await page.evaluate("""() => {
                 // Check __NEXT_DATA__ pageProps.aggregatorResponse first
                 const pp = window.__NEXT_DATA__?.props?.pageProps;

@@ -235,7 +235,7 @@ class LotConnectorClient:
                     wait_until="domcontentloaded",
                     timeout=25000,
                 )
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
                 _homepage_warmed = True
             else:
                 await page.goto(

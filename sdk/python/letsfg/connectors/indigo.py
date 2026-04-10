@@ -299,7 +299,7 @@ class IndiGoConnectorClient:
                 wait_until="domcontentloaded",
                 timeout=int(self.timeout * 1000),
             )
-            await asyncio.sleep(6.0)
+            await asyncio.sleep(3.0)
 
             await self._dismiss_cookies(page)
             await asyncio.sleep(0.5)

@@ -104,7 +104,7 @@ async def _ensure_persistent_page():
 
     logger.info("GOL: loading Angular SPA...")
     await page.goto(f"{_GOL_BASE}/compra", wait_until="domcontentloaded", timeout=30000)
-    await asyncio.sleep(6)
+    await asyncio.sleep(3)
 
     # Dismiss LGPD/cookie overlays
     await _dismiss_cookies(page)

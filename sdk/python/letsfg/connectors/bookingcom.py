@@ -304,7 +304,7 @@ class BookingcomConnectorClient:
                 body = await page.evaluate("() => document.body?.innerText?.substring(0, 300) || ''")
                 if "captcha" in body.lower() or "datadome" in body.lower() or "verify" in body.lower():
                     logger.warning("BookingCom: DataDome challenge detected, waiting...")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(4)
                 else:
                     break
             except Exception:

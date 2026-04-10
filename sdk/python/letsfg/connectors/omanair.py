@@ -124,7 +124,7 @@ class OmanairConnectorClient:
     async def _call_sputnik(self, payload: dict) -> list[dict]:
         try:
             from curl_cffi.requests import AsyncSession
-            async with AsyncSession(impersonate="chrome") as s:
+            async with AsyncSession(impersonate="chrome131") as s:
                 r = await s.post(_SPUTNIK_URL, json=payload, headers=_HEADERS, timeout=self.timeout)
             if r.status_code != 200:
                 logger.warning("OmanAir sputnik: %d %s", r.status_code, r.text[:200])

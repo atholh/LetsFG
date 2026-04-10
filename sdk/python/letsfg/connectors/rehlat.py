@@ -24,6 +24,7 @@ from typing import Any
 
 import httpx
 
+from .browser import get_httpx_proxy_url
 from ..models.flights import (
     FlightOffer,
     FlightRoute,
@@ -151,7 +152,8 @@ class RehlatConnectorClient:
         key = f"{now.strftime('%Y%m%d%H%M%S')}_{random.randint(10000000, 99999999):08d}"
 
         async with httpx.AsyncClient(
-            verify=False, follow_redirects=True, timeout=self.timeout
+            verify=False, follow_redirects=True, timeout=self.timeout,
+            proxy=get_httpx_proxy_url(),
         ) as client:
             # Step 1: Get search token
             try:

@@ -190,7 +190,7 @@ async def _ensure_token() -> str | None:
         return _token
     try:
         from curl_cffi import requests as cffi_requests
-        ses = cffi_requests.Session(impersonate="chrome", proxies=get_curl_cffi_proxies())
+        ses = cffi_requests.Session(impersonate="chrome131", proxies=get_curl_cffi_proxies())
         r = ses.post(_AUTH_URL, json={"profileId": _PROFILE_ID}, timeout=10)
         if r.status_code != 200:
             logger.warning("Vueling auth failed: %s %s", r.status_code, r.text[:200])
@@ -311,7 +311,7 @@ class VuelingConnectorClient:
                 "Content-Type": "application/json",
             }
 
-            ses = cffi_requests.Session(impersonate="chrome", proxies=get_curl_cffi_proxies())
+            ses = cffi_requests.Session(impersonate="chrome131", proxies=get_curl_cffi_proxies())
             r = ses.post(_GQL_URL, data=payload, headers=headers, timeout=15)
 
             if r.status_code != 200:

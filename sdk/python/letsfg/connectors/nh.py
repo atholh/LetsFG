@@ -200,7 +200,7 @@ class ANAConnectorClient:
         # Phase 1: Navigate via nodriver (bypasses Akamai sensor)
         nd_tab = await browser.get("https://www.ana.co.jp/en/us/")
         logger.info("NH: loading homepage for %s->%s on %s", req.origin, req.destination, date_str)
-        await asyncio.sleep(10.0)
+        await asyncio.sleep(5.0)
 
         # Dismiss overlays + set hidden inputs via nodriver
         await nd_tab.evaluate("""

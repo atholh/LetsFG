@@ -207,7 +207,7 @@ async def _ensure_warm_page():
             wait_until="domcontentloaded",
             timeout=30000,
         )
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
 
         # Create API session
         sess = await _warm_page.evaluate("""async () => {

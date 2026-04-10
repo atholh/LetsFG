@@ -167,7 +167,7 @@ async def _get_browser():
         )
         _launched_procs.append(_chrome_proc)
         # Cloudflare resolves when Chrome loads the page natively
-        await asyncio.sleep(12.0)
+        await asyncio.sleep(5.0)
 
         pw = await async_playwright().start()
         _pw_instance = pw

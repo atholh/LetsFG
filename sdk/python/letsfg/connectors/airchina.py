@@ -950,7 +950,7 @@ class AirChinaConnectorClient:
                     logger.info("AirChina: Captcha auto-solved! Waiting for results...")
                     # After captcha solve, wait for results to load.
                     # First try: just wait — the SPA may already have results behind captcha.
-                    await asyncio.sleep(5.0)
+                    await asyncio.sleep(4.0)
                     has_data = await page.evaluate(r"""() => {
                         const text = document.body.innerText || '';
                         return /CA\d{3,4}/.test(text) && /[￥¥]\d{3,}/.test(text);
@@ -974,8 +974,8 @@ class AirChinaConnectorClient:
                             await page.reload(wait_until="domcontentloaded", timeout=30000)
                         await asyncio.sleep(3.0)
                         # Wait for flight data after re-search/reload
-                        for wait_round in range(6):  # Up to 30 seconds
-                            await asyncio.sleep(5.0)
+                        for wait_round in range(6):  # Up to 18 seconds
+                            await asyncio.sleep(3.0)
                             # Check if flight data appeared
                             has_data = await page.evaluate(r"""() => {
                                 const text = document.body.innerText || '';

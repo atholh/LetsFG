@@ -37,7 +37,7 @@ from ..models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
-from .browser import stealth_args, auto_block_if_proxied
+from .browser import stealth_args, auto_block_if_proxied, get_curl_cffi_proxies
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +163,7 @@ class FlybondiConnectorClient:
 
     def _fetch_all_edges(self, url: str, req: FlightSearchRequest) -> list[dict] | None:
         """Fetch SSR page via curl_cffi and return ALL flight edges (outbound + inbound)."""
-        r = curl_requests.get(url, impersonate="chrome131", timeout=int(self.timeout))
+        r = curl_requests.get(url, impersonate="chrome131", timeout=int(self.timeout), proxies=get_curl_cffi_proxies())
         if r.status_code != 200:
             logger.warning("Flybondi API: HTTP %d", r.status_code)
             return None

@@ -176,7 +176,7 @@ class EtraveliConnectorClient:
 
         variables = {"routes": routes, "adults": req.adults or 1}
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=self.timeout, proxy=get_httpx_proxy_url()) as client:
             resp = await client.post(
                 _GQL_URL,
                 json={

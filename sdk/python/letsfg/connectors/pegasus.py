@@ -281,6 +281,10 @@ class PegasusConnectorClient:
                 await page.goto("about:blank", wait_until="commit", timeout=5000)
             except Exception:
                 pass
+            try:
+                await page.close()
+            except Exception:
+                pass
 
     # ── Response parsing ───────────────────────────────────────────────
 

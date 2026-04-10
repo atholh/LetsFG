@@ -39,7 +39,7 @@ from ..models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
-from .browser import stealth_args, auto_block_if_proxied
+from .browser import stealth_args, auto_block_if_proxied, get_curl_cffi_proxies
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ class FrontierConnectorClient:
             ret = req.return_from.strftime("%m/%d/%Y")
             url += f"&dr1={ret}"
 
-        async with AsyncSession(impersonate="chrome") as s:
+        async with AsyncSession(impersonate="chrome131", proxies=get_curl_cffi_proxies()) as s:
             resp = await s.get(url, timeout=15)
 
         if resp.status_code != 200:
@@ -221,7 +221,7 @@ class FrontierConnectorClient:
                 wait_until="domcontentloaded",
                 timeout=int(self.timeout * 1000),
             )
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
 
             title = await page.title()
             if "denied" in title.lower() or "blocked" in title.lower():

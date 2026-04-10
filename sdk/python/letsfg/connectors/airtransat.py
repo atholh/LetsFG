@@ -240,7 +240,7 @@ class AirTransatConnectorClient:
         try:
             logger.info("AirTransat: loading homepage for %s→%s", req.origin, req.destination)
             await page.goto(self.HOMEPAGE, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(3.0)
             await _dismiss_overlays(page)
 
             # One-way toggle — Air Transat uses li tab with .OW class

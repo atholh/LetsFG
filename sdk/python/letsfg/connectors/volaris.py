@@ -420,7 +420,7 @@ class VolarisConnectorClient:
     async def _extract_from_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
         """Fall back to DOM scraping on the Navitaire Angular results page."""
         try:
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
 
             # First check for JSON state in the page
             data = await page.evaluate("""() => {

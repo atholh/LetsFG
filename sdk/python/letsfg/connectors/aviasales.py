@@ -219,7 +219,7 @@ class AviasalesConnectorClient:
             deep_url = f"{_BASE}/search/{req.origin}{date_ddmm}{req.destination}{adults}"
             logger.info("Aviasales: navigating to deep-link %s", deep_url)
             await page.goto(deep_url, wait_until="domcontentloaded", timeout=int(self.timeout * 1000))
-            await asyncio.sleep(5.0)  # Aviasales needs more time to init search
+            await asyncio.sleep(3.0)  # Aviasales needs more time to init search
 
             await _dismiss_cookies(page)
 

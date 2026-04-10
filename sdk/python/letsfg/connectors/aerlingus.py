@@ -248,7 +248,7 @@ class AerLingusConnectorClient:
 
         try:
             from curl_cffi.requests import AsyncSession
-            async with AsyncSession(impersonate="chrome") as s:
+            async with AsyncSession(impersonate="chrome131") as s:
                 r = await s.post(_API_URL, json=payload, headers=_SPUTNIK_HEADERS, timeout=self.timeout)
             if r.status_code != 200:
                 logger.info("AerLingus Sputnik: HTTP %d", r.status_code)

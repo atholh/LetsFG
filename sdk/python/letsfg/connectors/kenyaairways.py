@@ -159,7 +159,7 @@ class KenyaAirwaysConnectorClient:
 
     async def _fetch_cards(self, payload: dict) -> list[dict]:
         from curl_cffi.requests import AsyncSession
-        async with AsyncSession(impersonate="chrome") as s:
+        async with AsyncSession(impersonate="chrome131") as s:
             response = await s.post(_API_URL, json=payload, headers=_HEADERS, timeout=self.timeout)
         response.raise_for_status()
 

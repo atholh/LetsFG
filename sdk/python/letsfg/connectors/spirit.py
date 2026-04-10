@@ -231,7 +231,7 @@ class SpiritConnectorClient:
                     )
                 except Exception as e:
                     logger.debug("NK: homepage nav: %s", e)
-                await asyncio.sleep(8)
+                await asyncio.sleep(4)
                 _homepage_warmed = True
             else:
                 try:
