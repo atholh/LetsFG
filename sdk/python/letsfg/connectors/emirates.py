@@ -219,6 +219,12 @@ def _extract_api_flights(payload: dict, out: list[dict]) -> None:
         _parse_bounds_payload(payload, out)
         return
 
+    # If we already have flights from a successful bounds parse, don't pollute
+    # with data from other API responses (e.g. currency-conversion results that
+    # contain ~113 junk entries at ~EUR50 each).
+    if out and any(f.get("bound_type") for f in out):
+        return
+
     # Detect currency from top-level
     currency = ""
     for ckey in ("currency", "saleCurrency", "pricedCurrency", "currencyCode"):
