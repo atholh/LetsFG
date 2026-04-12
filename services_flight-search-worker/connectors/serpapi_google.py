@@ -83,6 +83,7 @@ class SerpApiGoogleConnectorClient:
             "adults": str(req.adults or 1),
             "children": str(req.children or 0),
             "infants_in_seat": str(req.infants or 0),
+            "travel_class": {"M": "1", "W": "2", "C": "3", "F": "4"}.get(req.cabin_class, "1") if req.cabin_class else "1",
             "currency": req.currency or "USD",
             "hl": "en",
             "api_key": self._api_key,

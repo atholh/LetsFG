@@ -92,8 +92,10 @@ _CABIN_MAP = {
     "REFUNDABLE_FIRST": "first",
 }
 
-# Preference order for cheapest economy fare
+# Preference order for fare selection by cabin
 _ECONOMY_FARES = ["SAVER", "MAIN", "REFUNDABLE_MAIN"]
+_PREMIUM_FARES = ["PREMIUM", "REFUNDABLE_PREMIUM"]
+_FIRST_FARES = ["FIRST", "REFUNDABLE_FIRST"]
 
 
 class AlaskaConnectorClient:
@@ -280,9 +282,13 @@ class AlaskaConnectorClient:
             if stopovers > max_stops:
                 continue
 
-            # Find cheapest economy fare
+            # Find cheapest fare for requested cabin
+            _cabin_fares = {
+                "M": _ECONOMY_FARES, "W": _PREMIUM_FARES,
+                "C": _FIRST_FARES, "F": _FIRST_FARES,
+            }.get(req.cabin_class or "M", _ECONOMY_FARES)
             fare = None
-            for fare_key in _ECONOMY_FARES:
+            for fare_key in _cabin_fares:
                 if fare_key in solutions:
                     fare = solutions[fare_key]
                     break
@@ -295,7 +301,7 @@ class AlaskaConnectorClient:
 
             seats = fare.get("seatsRemaining")
             cabin_class = _CABIN_MAP.get(
-                next((k for k in _ECONOMY_FARES if k in solutions), "MAIN"),
+                next((k for k in _cabin_fares if k in solutions), "MAIN"),
                 "economy",
             )
 

@@ -583,6 +583,7 @@ class TwayAirConnectorClient:
             except ValueError:
                 continue
 
+            _tw_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
             segment = FlightSegment(
                 airline="TW",
                 airline_name="T'way Air",
@@ -591,7 +592,7 @@ class TwayAirConnectorClient:
                 destination=arr_airport,
                 departure=dep_dt,
                 arrival=dep_dt,
-                cabin_class="M",
+                cabin_class=_tw_cabin,
             )
 
             route = FlightRoute(

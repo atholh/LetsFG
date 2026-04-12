@@ -135,12 +135,13 @@ class BritishAirwaysConnectorClient:
 
         is_rt = bool(req.return_from)
         trip_type = "RT" if is_rt else "OW"
+        _ba_cabin = req.cabin_class or "M"  # BA SOLR: M/W/C/F
 
         fq = (
             f"departure_city:{dep_city}+AND+"
             f"arrival_city:{arr_city}+AND+"
             f"trip_type:{trip_type}+AND+"
-            f"cabin:M+AND+"
+            f"cabin:{_ba_cabin}+AND+"
             f"outbound_date:[{start_iso}+TO+{end_iso}]"
         )
         if is_rt and req.return_from:
@@ -217,6 +218,7 @@ class BritishAirwaysConnectorClient:
         if not docs:
             return []
 
+        _ba_cabin = req.cabin_class or "M"
         target_date = req.date_from.strftime("%Y-%m-%d")
         offers: list[FlightOffer] = []
 
@@ -268,7 +270,7 @@ class BritishAirwaysConnectorClient:
                 departure=dep_dt,
                 arrival=dep_dt,
                 duration_seconds=int(journey_time) * 60 if journey_time else 0,
-                cabin_class="economy",
+                cabin_class={"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(_ba_cabin, "economy"),
             )
             route = FlightRoute(
                 segments=[seg],
@@ -291,7 +293,7 @@ class BritishAirwaysConnectorClient:
                         departure=ret_dt,
                         arrival=ret_dt,
                         duration_seconds=0,
-                        cabin_class="economy",
+                        cabin_class={"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(_ba_cabin, "economy"),
                     )
                     inbound = FlightRoute(
                         segments=[ret_seg],
@@ -322,7 +324,7 @@ class BritishAirwaysConnectorClient:
                     f"https://www.britishairways.com/travel/fx/public/en_gb"
                     f"?from={dep_airport}&to={arr_airport}"
                     f"&depDate={outbound_date_str[:7].replace('-', '')}"
-                    f"&cabin=M&{'oneWay=false' if inbound else 'oneWay=true'}&ad={req.adults or 1}"
+                    f"&cabin={_ba_cabin}&{'oneWay=false' if inbound else 'oneWay=true'}&ad={req.adults or 1}"
                     + rt_params
                 ),
                 is_locked=False,

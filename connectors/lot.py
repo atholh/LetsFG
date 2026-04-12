@@ -235,7 +235,7 @@ class LotConnectorClient:
                     wait_until="domcontentloaded",
                     timeout=25000,
                 )
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
                 _homepage_warmed = True
             else:
                 await page.goto(
@@ -254,9 +254,10 @@ class LotConnectorClient:
 
             travelers = ["ADT"] * adults + ["CHD"] * children + ["INF"] * infants
 
+            _lo_compartment = {"M": "ECONOMY", "W": "PREMIUM_ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")
             payload = {
                 "travelers": travelers,
-                "compartment": "ECONOMY",
+                "compartment": _lo_compartment,
                 "itinerary": [
                     {
                         "originLocationCode": req.origin,
@@ -464,8 +465,6 @@ class LotConnectorClient:
             for offer in ab_offers:
                 avail = offer.get("availabilityDetails", [{}])
                 compartment = avail[0].get("compartment", "ECONOMY") if avail else "ECONOMY"
-                if compartment not in ("ECONOMY", "PREMIUM_ECONOMY"):
-                    continue
                 total_prices = (offer.get("prices") or {}).get("totalPrices", [])
                 if not total_prices:
                     continue
@@ -541,11 +540,13 @@ class LotConnectorClient:
     @staticmethod
     def _user_booking_url(req: FlightSearchRequest) -> str:
         dt = _to_datetime(req.date_from)
+        _lo_cabin = {"M": "ECONOMY", "W": "PREMIUM_ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")
+        _lo_trip = "ROUND_TRIP" if req.return_from else "ONE_WAY"
         return (
             f"https://www.lot.com/us/en/offer/flights"
             f"?departureAirport={req.origin}&arrivalAirport={req.destination}"
             f"&departureDate={dt.strftime('%d.%m.%Y')}&adults={req.adults or 1}"
-            f"&cabinClass=ECONOMY&tripType={'ROUND_TRIP' if req.return_from else 'ONE_WAY'}"
+            f"&cabinClass={_lo_cabin}&tripType={_lo_trip}"
         )
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:

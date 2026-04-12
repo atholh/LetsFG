@@ -179,6 +179,7 @@ class CheapoairConnectorClient:
             # CheapOair URL format
             dep = req.date_from.strftime("%m/%d/%Y")
             is_rt = bool(req.return_from)
+            _co_cabin = {"M": "Economy", "W": "Premium Economy", "C": "Business", "F": "First"}.get(req.cabin_class or "M", "Economy")
             url = (
                 f"https://www.cheapoair.com/flights/results"
                 f"?fl_dep_apt={req.origin}"
@@ -187,7 +188,7 @@ class CheapoairConnectorClient:
                 f"&fl_ADT={req.adults or 1}"
                 f"&fl_CHD={req.children or 0}"
                 f"&fl_INF=0"
-                f"&fl_class=Economy"
+                f"&fl_class={_co_cabin}"
                 f"&tripType={'2' if is_rt else '1'}"
             )
             if is_rt:

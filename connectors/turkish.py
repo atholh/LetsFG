@@ -60,7 +60,7 @@ _SPUTNIK_HEADERS = {
     "Referer": "https://mm-prerendering-static-prod.airtrfx.com/",
     "em-api-key": _SPUTNIK_KEY,
 }
-_SPUTNIK_MARKETS = ["TR", "GB", "US", "DE", "FR", "NL"]
+_SPUTNIK_MARKETS = ["TR", "GB", "US", "DE", "FR", "NL", "AE", "SA", "EG", "IN", "KR", "JP", "IT", "ES"]
 
 # Reverse lookup: airport code → city code (e.g. LHR → LON)
 _AIRPORT_TO_CITY: dict[str, str] = {}
@@ -290,7 +290,7 @@ class TurkishConnectorClient:
             "departure": {"start": start.isoformat(), "end": end.isoformat()},
             "budget": {"maximum": None},
             "passengers": {"adults": max(1, req.adults or 1)},
-            "travelClasses": ["ECONOMY"],
+            "travelClasses": [{"M": "ECONOMY", "W": "PREMIUM_ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")],
             "flightType": "ROUND_TRIP",   # Always RT — more cached fares, extractable for OW
             "flexibleDates": True,
             "faresPerRoute": "10",
@@ -305,7 +305,7 @@ class TurkishConnectorClient:
 
         try:
             from curl_cffi.requests import AsyncSession
-            async with AsyncSession(impersonate="chrome") as s:
+            async with AsyncSession(impersonate="chrome131") as s:
                 r = await s.post(_SPUTNIK_URL, json=payload, headers=_SPUTNIK_HEADERS, timeout=15)
             if r.status_code != 200:
                 logger.info("TK Sputnik: HTTP %d", r.status_code)
@@ -739,7 +739,7 @@ class TurkishConnectorClient:
                         direct_fetch_active = True
                         direct_result = await page.evaluate(
                         """async (args) => {
-                        const [origin, dest, dateDMY, adults, isRt, retDateDMY] = args;
+                        const [origin, dest, dateDMY, adults, isRt, retDateDMY, cabinCls] = args;
                         const controller = new AbortController();
                         const timer = setTimeout(() => controller.abort(), 15000);
                         try {
@@ -753,7 +753,7 @@ class TurkishConnectorClient:
                                 },
                                 body: JSON.stringify({
                                     selectedBookerSearch: isRt ? 'R' : 'O',
-                                    selectedCabinClass: 'ECONOMY',
+                                    selectedCabinClass: cabinCls,
                                     inbound: false,
                                     stayDuration: isRt ? 7 : 0,
                                     passengerTypeList: [{quantity: parseInt(adults), code: 'ADULT'}],
@@ -790,7 +790,8 @@ class TurkishConnectorClient:
                     }""",
                         [req.origin, req.destination, target_dmy, str(req.adults or 1),
                          bool(req.return_from),
-                         _to_datetime(req.return_from).strftime("%d-%m-%Y") if req.return_from else ""],
+                         _to_datetime(req.return_from).strftime("%d-%m-%Y") if req.return_from else "",
+                         {"M": "ECONOMY", "W": "PREMIUM_ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")],
                         )
                         # Give _on_response a moment to process
                         await asyncio.sleep(0.5)

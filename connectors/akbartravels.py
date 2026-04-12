@@ -119,7 +119,7 @@ def _results_url(req: FlightSearchRequest) -> str:
     inf = req.infants or 0
     # SecType: D=domestic (auto-detected by site), FareType: ON=one-way
     ft = "RT" if req.return_from else "ON"
-    cabin = "E"  # economy
+    cabin = {"M": "E", "W": "P", "C": "B", "F": "F"}.get(req.cabin_class or "M", "E")
     return (
         f"{_BASE}/in/flight/display/"
         f"{req.origin}-{req.destination}/{d}/{adt}_{chd}_{inf}/D/{ft}/{cabin}/false/NA/"
@@ -129,12 +129,13 @@ def _results_url(req: FlightSearchRequest) -> str:
 def _booking_url(req: FlightSearchRequest) -> str:
     dep = req.date_from.strftime("%d-%m-%Y")
     trip = "R" if req.return_from else "O"
+    _akb_booking_cabin = {"M": "Economy", "W": "Premium", "C": "Business", "F": "First"}.get(req.cabin_class or "M", "Economy")
     url = (
         f"{_BASE}/in/flight/search"
         f"?from={req.origin}&to={req.destination}"
         f"&depart={dep}&adults={req.adults or 1}"
         f"&children={req.children or 0}&infants={req.infants or 0}"
-        f"&class=Economy&trip={trip}&lan=en"
+        f"&class={_akb_booking_cabin}&trip={trip}&lan=en"
     )
     if req.return_from:
         url += f"&return={req.return_from.strftime('%d-%m-%Y')}"

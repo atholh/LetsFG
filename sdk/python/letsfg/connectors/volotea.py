@@ -281,10 +281,11 @@ class VoloteaConnectorClient:
                             dep_dt = self._parse_schedule_dt(ib_dep_str)
                             arr_dt = self._parse_schedule_dt(ib_flight.get("Arrival", ""))
                             dur = int((arr_dt - dep_dt).total_seconds()) if arr_dt > dep_dt else 0
+                            _v7_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
                             ib_seg = FlightSegment(
                                 airline=carrier, airline_name="Volotea", flight_no=fno,
                                 origin=req.destination, destination=req.origin,
-                                departure=dep_dt, arrival=arr_dt, cabin_class="M",
+                                departure=dep_dt, arrival=arr_dt, cabin_class=_v7_cabin,
                             )
                             ib_route = FlightRoute(segments=[ib_seg], total_duration_seconds=max(dur, 0), stopovers=0)
                             ib_price = float(p)
@@ -370,6 +371,7 @@ class VoloteaConnectorClient:
         flight_no = f"{carrier}{flight.get('FlightNumber') or ''}"
         dep_dt = self._parse_schedule_dt(flight.get("Departure", ""))
         arr_dt = self._parse_schedule_dt(flight.get("Arrival", ""))
+        _v7_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
 
         segment = FlightSegment(
             airline=carrier,
@@ -379,7 +381,7 @@ class VoloteaConnectorClient:
             destination=req.destination,
             departure=dep_dt,
             arrival=arr_dt,
-            cabin_class="M",
+            cabin_class=_v7_cabin,
         )
 
         total_dur = 0
@@ -408,7 +410,7 @@ class VoloteaConnectorClient:
                 flight_no=conn_flight_no,
                 origin=conn_origin, destination=conn_dest,
                 departure=conn_dep, arrival=conn_arr,
-                cabin_class="M",
+                cabin_class=_v7_cabin,
             )
             route = FlightRoute(
                 segments=[segment, segment2],
@@ -917,6 +919,7 @@ class VoloteaConnectorClient:
         elif dep_dt and arr_dt:
             total_dur = max(int((arr_dt - dep_dt).total_seconds()), 0)
 
+        _v7_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
         segment = FlightSegment(
             airline="V7",
             airline_name="Volotea",
@@ -925,7 +928,7 @@ class VoloteaConnectorClient:
             destination=req.destination,
             departure=dep_dt,
             arrival=arr_dt,
-            cabin_class="M",
+            cabin_class=_v7_cabin,
         )
         route = FlightRoute(
             segments=[segment],
@@ -1045,6 +1048,7 @@ class VoloteaConnectorClient:
         flight_no = f"{airline_code}{operator.get('flightNumber', '')}"
         origin = seg.get("departureStationCode") or req.origin
         destination = seg.get("arrivalStationCode") or req.destination
+        _v7_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
 
         return FlightSegment(
             airline=airline_code,
@@ -1054,7 +1058,7 @@ class VoloteaConnectorClient:
             destination=destination,
             departure=self._parse_dt(seg.get("departureDate", "")),
             arrival=self._parse_dt(seg.get("arrivalDate", "")),
-            cabin_class="M",
+            cabin_class=_v7_cabin,
         )
 
     @staticmethod

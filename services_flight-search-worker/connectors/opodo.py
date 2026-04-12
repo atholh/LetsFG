@@ -147,6 +147,8 @@ class OpodoConnectorClient:
 
             dep_date = req.date_from.isoformat()
             trip_type = "R" if req.return_from else "O"
+            _op_cabin = {"M": "E", "W": "W", "C": "B", "F": "F"}
+            cabin = _op_cabin.get(req.cabin_class, "E") if req.cabin_class else "E"
             url = (
                 f"https://www.opodo.co.uk/travel/"
                 f"#results/type={trip_type}"
@@ -154,7 +156,7 @@ class OpodoConnectorClient:
                 f";from={req.origin}"
                 f";to={req.destination}"
                 f";pa={req.adults or 1}"
-                f";py=E"
+                f";py={cabin}"
             )
             if req.return_from:
                 url += f";ret={req.return_from.isoformat()}"

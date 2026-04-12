@@ -330,7 +330,7 @@ class CebuPacificConnectorClient:
                     destination=seg_des.get("destination", req.destination),
                     departure=self._parse_dt(seg_des.get("departure")),
                     arrival=self._parse_dt(seg_des.get("arrival")),
-                    cabin_class="M",
+                    cabin_class={"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy"),
                 )
             )
 

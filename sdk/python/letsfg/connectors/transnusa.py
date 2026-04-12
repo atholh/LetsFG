@@ -616,6 +616,7 @@ class TransNusaConnectorClient:
 
         duration = int((arr_dt - dep_dt).total_seconds()) if arr_dt > dep_dt else 0
         stops = flight.get("stops", flight.get("stopovers", 0))
+        _8b_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
 
         segment = FlightSegment(
             airline="8B",
@@ -626,7 +627,7 @@ class TransNusaConnectorClient:
             departure=dep_dt,
             arrival=arr_dt,
             duration_seconds=duration,
-            cabin_class="economy",
+            cabin_class=_8b_cabin,
         )
 
         route = FlightRoute(
@@ -703,6 +704,7 @@ class TransNusaConnectorClient:
             # Flight number
             fn_m = re.search(r'\b(8B\s*\d+|QG\s*\d+)\b', card_html)
             flight_no = fn_m.group(1).replace(" ", "") if fn_m else ""
+            _8b_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
 
             segment = FlightSegment(
                 airline="8B",
@@ -713,7 +715,7 @@ class TransNusaConnectorClient:
                 departure=dep_dt,
                 arrival=arr_dt,
                 duration_seconds=duration,
-                cabin_class="economy",
+                cabin_class=_8b_cabin,
             )
 
             route = FlightRoute(

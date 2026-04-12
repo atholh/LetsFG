@@ -688,12 +688,13 @@ class JetSmartConnectorClient:
                 continue
 
             # Build a minimal offer — no segment details from timetable
+            _ja_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
             dep_dt = self._parse_dt(date_val)
             seg = FlightSegment(
                 airline="JA", airline_name="JetSMART", flight_no="",
                 origin=req.origin, destination=req.destination,
                 departure=dep_dt, arrival=dep_dt,
-                cabin_class="M",
+                cabin_class=_ja_cabin,
             )
             route = FlightRoute(segments=[seg], total_duration_seconds=0, stopovers=0)
             h = hashlib.md5(f"tt_{date_val}_{price}".encode()).hexdigest()[:12]
@@ -755,13 +756,14 @@ class JetSmartConnectorClient:
         if best_price is None or best_price <= 0:
             return None
 
+        _ja_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
         segments_raw = flight.get("segments") or flight.get("legs") or flight.get("flights") or []
         segments: list[FlightSegment] = []
         if segments_raw and isinstance(segments_raw, list):
             for seg in segments_raw:
-                segments.append(self._build_segment(seg, req.origin, req.destination))
+                segments.append(self._build_segment(seg, req.origin, req.destination, _ja_cabin))
         else:
-            segments.append(self._build_segment(flight, req.origin, req.destination))
+            segments.append(self._build_segment(flight, req.origin, req.destination, _ja_cabin))
 
         total_dur = 0
         if segments and segments[0].departure and segments[-1].arrival:
@@ -828,7 +830,7 @@ class JetSmartConnectorClient:
                     pass
         return best if best < float("inf") else None
 
-    def _build_segment(self, seg: dict, default_origin: str, default_dest: str) -> FlightSegment:
+    def _build_segment(self, seg: dict, default_origin: str, default_dest: str, cabin_class: str = "economy") -> FlightSegment:
         dep_str = seg.get("departureDateTime") or seg.get("departure") or seg.get("std") or seg.get("designator", {}).get("departure", "")
         arr_str = seg.get("arrivalDateTime") or seg.get("arrival") or seg.get("sta") or seg.get("designator", {}).get("arrival", "")
         flight_no = str(
@@ -841,7 +843,7 @@ class JetSmartConnectorClient:
             airline="JA", airline_name="JetSMART", flight_no=flight_no,
             origin=origin, destination=destination,
             departure=self._parse_dt(dep_str), arrival=self._parse_dt(arr_str),
-            cabin_class="M",
+            cabin_class=cabin_class,
         )
 
     def _build_response(self, offers: list[FlightOffer], req: FlightSearchRequest, elapsed: float) -> FlightSearchResponse:

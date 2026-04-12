@@ -744,10 +744,11 @@ class EurowingsConnectorClient:
                 dep_dt = self._parse_time_on_date(dep_time, req.date_from) if dep_time else datetime(2000, 1, 1)
                 arr_dt = self._parse_time_on_date(arr_time, req.date_from) if arr_time else datetime(2000, 1, 1)
 
+                _ew_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
                 seg = FlightSegment(
                     airline="EW", airline_name="Eurowings", flight_no=flight_no,
                     origin=req.origin, destination=req.destination,
-                    departure=dep_dt, arrival=arr_dt, cabin_class="M",
+                    departure=dep_dt, arrival=arr_dt, cabin_class=_ew_cabin,
                 )
                 dur = int((arr_dt - dep_dt).total_seconds()) if dep_dt.year > 2000 and arr_dt.year > 2000 else 0
                 route = FlightRoute(segments=[seg], total_duration_seconds=max(dur, 0), stopovers=0)
@@ -891,6 +892,7 @@ class EurowingsConnectorClient:
             flight_no = op_info.get("flightNo", "")
             airline_name = op_info.get("operatingAirlineName", "Eurowings")
 
+            _ew_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
             segments.append(FlightSegment(
                 airline=airline_code,
                 airline_name=airline_name,
@@ -899,7 +901,7 @@ class EurowingsConnectorClient:
                 destination=dest,
                 departure=self._parse_dt(dep_time),
                 arrival=self._parse_dt(arr_time),
-                cabin_class="M",
+                cabin_class=_ew_cabin,
             ))
 
         if not segments:
@@ -982,13 +984,14 @@ class EurowingsConnectorClient:
         if price <= 0:
             return None
 
+        _ew_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
         segments_raw = flight.get("segments") or flight.get("legs") or flight.get("flights") or []
         segments: list[FlightSegment] = []
         if segments_raw and isinstance(segments_raw, list):
             for seg in segments_raw:
-                segments.append(self._build_segment(seg, req.origin, req.destination))
+                segments.append(self._build_segment(seg, req.origin, req.destination, _ew_cabin))
         else:
-            segments.append(self._build_segment(flight, req.origin, req.destination))
+            segments.append(self._build_segment(flight, req.origin, req.destination, _ew_cabin))
         if not segments:
             return None
 
@@ -1014,7 +1017,7 @@ class EurowingsConnectorClient:
             source="eurowings_direct", source_tier="free",
         )
 
-    def _build_segment(self, seg: dict, default_origin: str, default_dest: str) -> FlightSegment:
+    def _build_segment(self, seg: dict, default_origin: str, default_dest: str, cabin_class: str = "economy") -> FlightSegment:
         dep_str = seg.get("departure") or seg.get("departureDate") or seg.get("departureTime") or seg.get("std") or ""
         arr_str = seg.get("arrival") or seg.get("arrivalDate") or seg.get("arrivalTime") or seg.get("sta") or ""
         flight_no = str(seg.get("flightNumber") or seg.get("flight_no") or seg.get("flightNo") or seg.get("number") or "").replace(" ", "")
@@ -1024,7 +1027,7 @@ class EurowingsConnectorClient:
             airline="EW", airline_name="Eurowings", flight_no=flight_no,
             origin=origin, destination=destination,
             departure=self._parse_dt(dep_str), arrival=self._parse_dt(arr_str),
-            cabin_class="M",
+            cabin_class=cabin_class,
         )
 
     @staticmethod

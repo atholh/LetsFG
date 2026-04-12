@@ -254,9 +254,10 @@ class LotConnectorClient:
 
             travelers = ["ADT"] * adults + ["CHD"] * children + ["INF"] * infants
 
+            _lo_compartment = {"M": "ECONOMY", "W": "PREMIUM_ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")
             payload = {
                 "travelers": travelers,
-                "compartment": "ECONOMY",
+                "compartment": _lo_compartment,
                 "itinerary": [
                     {
                         "originLocationCode": req.origin,
@@ -384,6 +385,7 @@ class LotConnectorClient:
             raw_segments = flight.get("segments", [])
 
             # Parse segments from segment IDs
+            _lo_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
             segments: list[FlightSegment] = []
             for raw_seg in raw_segments:
                 seg_id = raw_seg.get("segmentId", "")
@@ -400,7 +402,7 @@ class LotConnectorClient:
                         departure=parsed["departure"],
                         arrival=parsed["departure"],  # placeholder
                         duration_seconds=0,
-                        cabin_class="economy",
+                        cabin_class=_lo_cabin,
                     )
                 )
 
@@ -418,7 +420,7 @@ class LotConnectorClient:
                     departure=segments[0].departure,
                     arrival=segments[0].departure + timedelta(seconds=total_dur),
                     duration_seconds=total_dur,
-                    cabin_class="economy",
+                    cabin_class=_lo_cabin,
                 )
             elif total_dur > 0 and len(segments) > 1:
                 # Multi-segment: compute per-segment durations from gap between departures
@@ -434,7 +436,7 @@ class LotConnectorClient:
                         departure=segments[i].departure,
                         arrival=segments[i].departure + timedelta(seconds=seg_dur),
                         duration_seconds=seg_dur,
-                        cabin_class="economy",
+                        cabin_class=_lo_cabin,
                     )
                 # Last segment: remaining duration
                 elapsed = int((segments[-1].departure - segments[0].departure).total_seconds())
@@ -448,7 +450,7 @@ class LotConnectorClient:
                     departure=segments[-1].departure,
                     arrival=segments[-1].departure + timedelta(seconds=last_dur),
                     duration_seconds=last_dur,
-                    cabin_class="economy",
+                    cabin_class=_lo_cabin,
                 )
 
             route = FlightRoute(
@@ -464,8 +466,6 @@ class LotConnectorClient:
             for offer in ab_offers:
                 avail = offer.get("availabilityDetails", [{}])
                 compartment = avail[0].get("compartment", "ECONOMY") if avail else "ECONOMY"
-                if compartment not in ("ECONOMY", "PREMIUM_ECONOMY"):
-                    continue
                 total_prices = (offer.get("prices") or {}).get("totalPrices", [])
                 if not total_prices:
                     continue
@@ -541,11 +541,13 @@ class LotConnectorClient:
     @staticmethod
     def _user_booking_url(req: FlightSearchRequest) -> str:
         dt = _to_datetime(req.date_from)
+        _lo_cabin = {"M": "ECONOMY", "W": "PREMIUM_ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")
+        _lo_trip = "ROUND_TRIP" if req.return_from else "ONE_WAY"
         return (
             f"https://www.lot.com/us/en/offer/flights"
             f"?departureAirport={req.origin}&arrivalAirport={req.destination}"
             f"&departureDate={dt.strftime('%d.%m.%Y')}&adults={req.adults or 1}"
-            f"&cabinClass=ECONOMY&tripType={'ROUND_TRIP' if req.return_from else 'ONE_WAY'}"
+            f"&cabinClass={_lo_cabin}&tripType={_lo_trip}"
         )
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:

@@ -95,13 +95,14 @@ class CleartripConnectorClient:
                 is_intl = not _same_country(req.origin, req.destination)
                 date_str = req.date_from.strftime("%d/%m/%Y")
                 date_encoded = quote(date_str, safe="")
+                _ct_cabin = {"M": "Economy", "W": "Premium Economy", "C": "Business", "F": "First"}.get(req.cabin_class, "Economy") if req.cabin_class else "Economy"
 
                 search_url = (
                     f"{_BASE}/flight/search/v2"
                     f"?from={req.origin}&source_header={req.origin}"
                     f"&to={req.destination}&destination_header={req.destination}"
                     f"&depart_date={date_encoded}"
-                    f"&class=Economy"
+                    f"&class={_ct_cabin}"
                     f"&adults={req.adults or 1}"
                     f"&childs={req.children or 0}"
                     f"&infants={req.infants or 0}"

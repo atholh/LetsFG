@@ -40,7 +40,7 @@ from ..models.flights import (
     FlightSearchResponse,
     FlightSegment,
 )
-from .browser import stealth_args, auto_block_if_proxied
+from .browser import stealth_args, auto_block_if_proxied, get_curl_cffi_proxies
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ async def _get_browser():
     async with lock:
         if _browser and _browser.is_connected():
             return _browser
-        from connectors.browser import launch_headed_browser
+        from .browser import launch_headed_browser
         _browser = await launch_headed_browser()
         logger.info("FlyDubai: browser launched")
         return _browser
@@ -146,7 +146,7 @@ class FlydubaiConnectorClient:
         payload = {
             "promoCode": "",
             "campaignCode": "",
-            "cabinClass": "Economy",
+            "cabinClass": {"M": "Economy", "W": "Economy", "C": "Business", "F": "Business"}.get(req.cabin_class or "M", "Economy"),
             "isDestMetro": "false",
             "isOriginMetro": "false",
             "paxInfo": {
@@ -158,7 +158,7 @@ class FlydubaiConnectorClient:
             "variant": "1",
         }
 
-        async with AsyncSession(impersonate="chrome131") as session:
+        async with AsyncSession(impersonate="chrome131", proxies=get_curl_cffi_proxies()) as session:
             r = await session.post(
                 "https://flights2.flydubai.com/api/flights/7",
                 headers={
@@ -551,7 +551,7 @@ class FlydubaiConnectorClient:
     async def _extract_from_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
         """Fallback: extract flight data from the Angular results page DOM."""
         try:
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
             # The results page is an Angular app on flights2.flydubai.com.
             # The calendar strip (fz-calendar-tab) always renders even when
             # loading is incomplete.  Extract per-date prices from tabs.

@@ -302,13 +302,14 @@ class SamoaAirwaysConnectorClient:
             if arr_dt < dep_dt:
                 arr_dt += timedelta(days=1)
             dur = int((arr_dt - dep_dt).total_seconds()) if arr_dt > dep_dt else 0
+            _ph_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
 
             segment = FlightSegment(
                 airline="PH", airline_name="Samoa Airways",
                 flight_no=str(flight_no),
                 origin=req.origin, destination=req.destination,
                 departure=dep_dt, arrival=arr_dt,
-                duration_seconds=dur, cabin_class="economy",
+                duration_seconds=dur, cabin_class=_ph_cabin,
             )
             route = FlightRoute(segments=[segment], total_duration_seconds=dur, stopovers=0)
             fid = hashlib.md5(f"ph_{flight_no}_{price}_{req.date_from}".encode()).hexdigest()[:12]
@@ -371,13 +372,14 @@ class SamoaAirwaysConnectorClient:
             dur = int((arr_dt - dep_dt).total_seconds()) if arr_dt > dep_dt else 0
             fn_m = re.search(r'\b(PH\s*\d+|OL\s*\d+)\b', card)
             flight_no = fn_m.group(1).replace(" ", "") if fn_m else ""
+            _ph_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
 
             segment = FlightSegment(
                 airline="PH", airline_name="Samoa Airways",
                 flight_no=flight_no,
                 origin=req.origin, destination=req.destination,
                 departure=dep_dt, arrival=arr_dt,
-                duration_seconds=dur, cabin_class="economy",
+                duration_seconds=dur, cabin_class=_ph_cabin,
             )
             route = FlightRoute(segments=[segment], total_duration_seconds=dur, stopovers=0)
             fid = hashlib.md5(f"ph_{flight_no}_{price}_{req.date_from}".encode()).hexdigest()[:12]

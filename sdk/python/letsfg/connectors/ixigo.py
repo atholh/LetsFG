@@ -164,13 +164,15 @@ class IxigoConnectorClient:
 
             # iXigo URL format: /search/result/flight
             dep = req.date_from.strftime("%d%m%Y")
+            _ix_cabin = {"M": "e", "W": "p", "C": "b", "F": "f"}
+            cabin = _ix_cabin.get(req.cabin_class, "e") if req.cabin_class else "e"
             url = (
                 f"https://www.ixigo.com/search/result/flight"
                 f"?from={req.origin}&to={req.destination}"
                 f"&date={dep}"
                 f"&adults={req.adults or 1}"
                 f"&children={req.children or 0}&infants=0"
-                f"&class=e&source=Search+Form"
+                f"&class={cabin}&source=Search+Form"
             )
             if req.return_from:
                 ret = req.return_from.strftime("%d%m%Y")

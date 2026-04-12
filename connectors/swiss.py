@@ -27,5 +27,5 @@ class SwissConnectorClient(LHGroupBaseConnector):
         "origin={origin}&destination={destination}"
         "&outbound-date={date}"
         "&adults={adults}&children={children}"
-        "&infants={infants}&cabin-class=economy&trip-type=ONE_WAY"
+        "&infants={infants}&cabin-class={cabin}&trip-type=ONE_WAY"
     )

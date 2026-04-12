@@ -511,6 +511,7 @@ class SmartwingsConnectorClient:
             dur_secs = self._parse_duration(duration_str)
             if dur_secs == 0 and dep_dt and arr_dt:
                 dur_secs = int((arr_dt - dep_dt).total_seconds())
+            _qs_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
 
             segment = FlightSegment(
                 airline="QS",
@@ -521,7 +522,7 @@ class SmartwingsConnectorClient:
                 departure=dep_dt,
                 arrival=arr_dt,
                 duration_seconds=dur_secs,
-                cabin_class="economy",
+                cabin_class=_qs_cabin,
             )
             route = FlightRoute(
                 segments=[segment],

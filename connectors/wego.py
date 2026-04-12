@@ -361,11 +361,9 @@ class WegoConnectorClient:
         children = req.children or 0
         infants = req.infants or 0
 
-        cabin_map = {"economy": "economy", "premium_economy": "premium_economy",
-                     "business": "business", "first": "first"}
-        cabin = cabin_map.get(
-            getattr(req, "cabin_class", "economy") or "economy", "economy",
-        )
+        cabin_map = {"M": "economy", "W": "premium_economy",
+                     "C": "business", "F": "first"}
+        cabin = cabin_map.get(req.cabin_class, "economy") if req.cabin_class else "economy"
 
         # Wego URL format: /flights/{city-IATA}/{city-IATA}/{date}
         origin_slug = _wego_slug(req.origin)

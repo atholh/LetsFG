@@ -86,7 +86,7 @@ class DespegarConnectorClient:
             "to": req.destination,
             "departure": date_str,
             "adults": str(req.adults or 1),
-            "cabinClass": "economy",
+            "cabinClass": {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class, "economy") if req.cabin_class else "economy",
         }
 
         for endpoint in endpoints:

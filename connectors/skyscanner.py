@@ -278,11 +278,13 @@ class SkyscannerConnectorClient:
             date_str = f"{d.year % 100:02d}{d.month:02d}{d.day:02d}"
             origin = req.origin.lower()
             dest = req.destination.lower()
+            _sky_cabin = {"M": "economy", "W": "premiumeconomy", "C": "business", "F": "first"}
+            cabin = _sky_cabin.get(req.cabin_class, "economy") if req.cabin_class else "economy"
             url = (
                 f"https://www.skyscanner.net/transport/flights/"
                 f"{origin}/{dest}/{date_str}/"
                 f"?adultsv2={req.adults or 1}"
-                f"&cabinclass=economy"
+                f"&cabinclass={cabin}"
                 f"&ref=home"
             )
 

@@ -852,10 +852,11 @@ class SingaporeConnectorClient:
         except (ValueError, TypeError):
             date_str = ""
         trip_type = "R" if req.return_from else "O"
+        _sq_cabin = {"M": "Y", "W": "S", "C": "J", "F": "F"}.get(req.cabin_class or "M", "Y")
         url = (
             f"https://www.singaporeair.com/en_UK/sg/plan-and-book/official-website-background/"
             f"?selectedOrigin={req.origin}&selectedDestination={req.destination}"
-            f"&selectedDate={date_str}&tripType={trip_type}&cabinClass=Y"
+            f"&selectedDate={date_str}&tripType={trip_type}&cabinClass={_sq_cabin}"
             f"&numOfAdults={req.adults or 1}&numOfChildren={req.children or 0}"
             f"&numOfInfants={req.infants or 0}"
         )

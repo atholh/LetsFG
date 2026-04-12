@@ -376,6 +376,48 @@ _FAST_MODE_SOURCES: set[str] = {
     "kiwi_connector",
 }
 
+# ── Cabin class support ─────────────────────────────────────────────────────
+# Economy-only connectors — airlines that genuinely have no premium cabin.
+# When the user requests cabin_class C/F/W, these connectors are skipped
+# entirely (they would only return economy results anyway).
+_ECONOMY_ONLY_SOURCES: set[str] = {
+    "ryanair_direct", "easyjet_direct", "wizzair_direct",
+    "spirit_direct", "frontier_direct", "southwest_direct", "allegiant_direct",
+    "flair_direct", "avelo_direct",
+    "flybondi_direct", "jetsmart_direct", "skyairline_direct",
+    "volaris_direct", "vivaaerobus_direct", "wingo_direct",
+    "flyadeal_direct", "airarabia_direct", "salamair_direct",
+    "indigo_direct", "spicejet_direct", "akasa_direct",
+    "cebupacific_direct", "nokair_direct", "citilink_direct",
+    "airindiaexpress_direct", "peach_direct",
+    "spring_direct", "9air_direct", "luckyair_direct",
+    "superairjet_direct", "transnusa_direct",
+    "transavia_direct", "level_direct", "volotea_direct",
+    "jet2_direct", "flyarystan_direct", "smartwings_direct",
+    "linkairways_direct", "flysafair_direct", "rex_direct",
+    "pngair_direct", "solomonairlines_direct", "samoaairways_direct",
+    "airnorth_direct", "skyexpress_direct", "iberiaexpress_direct",
+    "airpeace_direct", "usbangla_direct",
+}
+
+# Map our cabin codes (M/W/C/F) to normalized cabin strings used in FlightSegment.
+# Connectors may return varied cabin strings — this normalizes for comparison.
+_CABIN_CODE_TO_NAMES: dict[str, set[str]] = {
+    "M": {"economy", "m", "y", "eco", "coach"},
+    "W": {"premium_economy", "premium economy", "w", "premium", "premiumeconomy"},
+    "C": {"business", "c", "j", "biz", "businessclass"},
+    "F": {"first", "f", "firstclass", "first class"},
+}
+
+
+def _normalize_cabin_to_code(cabin_str: str) -> str:
+    """Convert a freeform cabin string to our standard code (M/W/C/F)."""
+    val = cabin_str.lower().strip()
+    for code, names in _CABIN_CODE_TO_NAMES.items():
+        if val in names or val == code.lower():
+            return code
+    return "M"  # default to economy for unknown values
+
 
 def _should_use_browsers() -> bool:
     """Decide whether browser-based connectors should run.
@@ -816,6 +858,13 @@ class MultiProvider:
         origin_country = get_country(req.origin)
         dest_country = get_country(req.destination)
 
+        # Cabin class pre-filter: skip economy-only connectors when a
+        # non-economy cabin is requested (C=business, F=first, W=premium eco).
+        cabin_filter_active = req.cabin_class and req.cabin_class != "M"
+        if cabin_filter_active:
+            logger.info("Cabin filter active: %s — skipping economy-only connectors",
+                        req.cabin_class)
+
         ryanair_connector = self._get_ryanair_connector()
         wizzair_connector = self._get_wizzair_connector()
         kiwi_connector = self._get_kiwi_connector()
@@ -823,6 +872,7 @@ class MultiProvider:
         # In fast mode, only include these special connectors if they're in _FAST_MODE_SOURCES
         ryanair_countries = AIRLINE_COUNTRIES.get("ryanair")
         if ryanair_connector and (not fast_mode or "ryanair_direct" in _FAST_MODE_SOURCES) and (
+                not cabin_filter_active or "ryanair_direct" not in _ECONOMY_ONLY_SOURCES) and (
                 not origin_country or not dest_country or not ryanair_countries
                 or (origin_country in ryanair_countries and dest_country in ryanair_countries)):
             tasks.append(self._search_ryanair_direct(ryanair_connector, req))
@@ -831,6 +881,7 @@ class MultiProvider:
         # Wizzair requires Chrome (CDP) — skip when browsers unavailable
         wizz_countries = AIRLINE_COUNTRIES.get("wizz")
         if _BROWSERS_AVAILABLE and wizzair_connector and (not fast_mode or "wizzair_direct" in _FAST_MODE_SOURCES) and (
+                not cabin_filter_active or "wizzair_direct" not in _ECONOMY_ONLY_SOURCES) and (
                 not origin_country or not dest_country or not wizz_countries
                 or (origin_country in wizz_countries and dest_country in wizz_countries)):
             tasks.append(self._search_wizzair_direct(wizzair_connector, req))
@@ -843,6 +894,18 @@ class MultiProvider:
 
         # ── Direct airline website connectors (46 LCCs) — route-filtered ──
         filtered_connectors = get_relevant_connectors(req.origin, req.destination, _DIRECT_AIRLINE_connectorS)
+
+        # Cabin class pre-filter: skip economy-only connectors for non-economy cabin
+        if cabin_filter_active:
+            before_cabin = len(filtered_connectors)
+            filtered_connectors = [
+                (src, cls, t) for src, cls, t in filtered_connectors
+                if src not in _ECONOMY_ONLY_SOURCES
+            ]
+            cabin_skipped = before_cabin - len(filtered_connectors)
+            if cabin_skipped:
+                logger.info("Cabin filter: skipped %d economy-only connectors (cabin=%s)",
+                            cabin_skipped, req.cabin_class)
 
         # Fast mode: filter to only OTAs + metas + key LCCs
         if fast_mode:
@@ -928,6 +991,9 @@ class MultiProvider:
                 ("ryanair_direct", self._get_ryanair_connector),
                 ("kiwi_connector", self._get_kiwi_connector),
             ]:
+                # Skip economy-only connectors when cabin filter is active
+                if cabin_filter_active and label in _ECONOMY_ONLY_SOURCES:
+                    continue
                 client_out = getter()
                 client_ret = getter()
                 if client_out:
@@ -948,6 +1014,12 @@ class MultiProvider:
             return_filtered = get_relevant_connectors(
                 req.destination, req.origin, _DIRECT_AIRLINE_connectorS
             )
+            # Cabin class: skip economy-only connectors for return legs too
+            if cabin_filter_active:
+                return_filtered = [
+                    (s, c, t) for s, c, t in return_filtered
+                    if s not in _ECONOMY_ONLY_SOURCES
+                ]
             # Skip browser connectors when Chrome is not available (same as outbound)
             if not _BROWSERS_AVAILABLE:
                 return_filtered = [
@@ -1136,6 +1208,19 @@ class MultiProvider:
             if filtered_count:
                 logger.info("max_stopovers=%d filter removed %d offers (%d remain)",
                             req.max_stopovers, filtered_count, len(deduped))
+
+        # ── Filter by cabin class ──────────────────────────────────────────
+        # Applied post-aggregate so ALL sources respect it.  Connectors that
+        # natively support cabin filtering already return correct results;
+        # this catches connectors that ignore cabin_class and return mixed
+        # cabin results or only economy.
+        if req.cabin_class:
+            before_count = len(deduped)
+            deduped = [o for o in deduped if self._matches_cabin(o, req.cabin_class)]
+            filtered_count = before_count - len(deduped)
+            if filtered_count:
+                logger.info("cabin_class=%s filter removed %d offers (%d remain)",
+                            req.cabin_class, filtered_count, len(deduped))
 
         # ── Route validation ───────────────────────────────────────────────
         # Reject offers where outbound origin/destination don't match the
@@ -1672,6 +1757,46 @@ class MultiProvider:
         if code in self._CITY_AIRPORTS:
             return self._CITY_AIRPORTS[code]
         return {code}
+
+    @staticmethod
+    def _matches_cabin(offer: FlightOffer, cabin_code: str) -> bool:
+        """Check if an offer's segments match the requested cabin class.
+
+        Returns True if ANY segment in the offer matches the requested cabin.
+        
+        For economy (M) searches: also keeps offers with empty/default cabin
+        values (connector didn't report cabin — common for LCCs).
+        
+        For premium searches (W/C/F): only keeps offers that explicitly match
+        the requested cabin — economy-only offers are filtered out.
+        """
+        target_names = _CABIN_CODE_TO_NAMES.get(cabin_code, set())
+        is_economy_search = cabin_code == "M"
+
+        def _route_matches(route) -> bool:
+            if route is None or not route.segments:
+                return True  # no route info → don't filter
+            
+            # Check if any segment explicitly matches the requested cabin
+            has_matching_cabin = any(
+                _normalize_cabin_to_code(seg.cabin_class) == cabin_code
+                for seg in route.segments
+                if seg.cabin_class and seg.cabin_class.lower() not in ("", "m", "economy")
+            )
+            
+            # For economy searches: keep if matching OR if cabin is unreported
+            if is_economy_search:
+                all_default = all(
+                    seg.cabin_class in ("economy", "M", "m", "") or not seg.cabin_class
+                    for seg in route.segments
+                )
+                return has_matching_cabin or all_default
+            
+            # For premium cabin searches (W/C/F): only keep if explicitly matching
+            # This filters out economy offers from OTAs that return mixed results
+            return has_matching_cabin
+
+        return _route_matches(offer.outbound) and _route_matches(offer.inbound)
 
     def _filter_wrong_routes(self, offers: list[FlightOffer], req: FlightSearchRequest) -> list[FlightOffer]:
         """Remove offers whose actual route doesn't match the requested origin → destination."""

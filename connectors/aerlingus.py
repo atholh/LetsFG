@@ -236,7 +236,7 @@ class AerLingusConnectorClient:
             "departure": {"start": start.isoformat(), "end": end.isoformat()},
             "budget": {"maximum": None},
             "passengers": {"adults": max(1, req.adults or 1)},
-            "travelClasses": ["ECONOMY"],
+            "travelClasses": [{"M": "ECONOMY", "W": "PREMIUM_ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")],
             "flightType": "ROUND_TRIP" if req.return_from else "ONE_WAY",
             "flexibleDates": True,
             "faresPerRoute": "10",
@@ -248,7 +248,7 @@ class AerLingusConnectorClient:
 
         try:
             from curl_cffi.requests import AsyncSession
-            async with AsyncSession(impersonate="chrome") as s:
+            async with AsyncSession(impersonate="chrome131") as s:
                 r = await s.post(_API_URL, json=payload, headers=_SPUTNIK_HEADERS, timeout=self.timeout)
             if r.status_code != 200:
                 logger.info("AerLingus Sputnik: HTTP %d", r.status_code)

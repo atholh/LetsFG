@@ -173,11 +173,13 @@ class TripcomConnectorClient:
             dep_date = req.date_from.isoformat()
             trip_type = "oneway" if not req.return_from else "round"
             route = f"{req.origin.lower()}-{req.destination.lower()}"
+            _tc_cabin = {"M": "y_s", "W": "s_s", "C": "c", "F": "f"}
+            cabin = _tc_cabin.get(req.cabin_class, "y_s") if req.cabin_class else "y_s"
             url = (
                 f"https://flights.ctrip.com/online/list/"
                 f"{trip_type}-{route}"
                 f"?depdate={dep_date}"
-                f"&cabin=y_s"
+                f"&cabin={cabin}"
                 f"&adult={req.adults or 1}"
                 f"&child=0&infant=0"
             )

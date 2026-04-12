@@ -120,7 +120,7 @@ class CathayConnectorClient:
         params = {
             "ORIGIN": req.origin,
             "LANGUAGE": "GB",
-            "CABIN": "Y",
+            "CABIN": {"M": "Y", "W": "W", "C": "C", "F": "F"}.get(req.cabin_class or "M", "Y"),
             "SITE": "CBEUCBEU",
             "TRIP_TYPE": "R" if req.return_from else "O",
         }

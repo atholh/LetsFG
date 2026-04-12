@@ -290,7 +290,7 @@ class TurkishConnectorClient:
             "departure": {"start": start.isoformat(), "end": end.isoformat()},
             "budget": {"maximum": None},
             "passengers": {"adults": max(1, req.adults or 1)},
-            "travelClasses": ["ECONOMY"],
+            "travelClasses": [{"M": "ECONOMY", "W": "PREMIUM_ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")],
             "flightType": "ROUND_TRIP",   # Always RT — more cached fares, extractable for OW
             "flexibleDates": True,
             "faresPerRoute": "10",
@@ -739,7 +739,7 @@ class TurkishConnectorClient:
                         direct_fetch_active = True
                         direct_result = await page.evaluate(
                         """async (args) => {
-                        const [origin, dest, dateDMY, adults, isRt, retDateDMY] = args;
+                        const [origin, dest, dateDMY, adults, isRt, retDateDMY, cabinCls] = args;
                         const controller = new AbortController();
                         const timer = setTimeout(() => controller.abort(), 15000);
                         try {
@@ -753,7 +753,7 @@ class TurkishConnectorClient:
                                 },
                                 body: JSON.stringify({
                                     selectedBookerSearch: isRt ? 'R' : 'O',
-                                    selectedCabinClass: 'ECONOMY',
+                                    selectedCabinClass: cabinCls,
                                     inbound: false,
                                     stayDuration: isRt ? 7 : 0,
                                     passengerTypeList: [{quantity: parseInt(adults), code: 'ADULT'}],
@@ -790,7 +790,8 @@ class TurkishConnectorClient:
                     }""",
                         [req.origin, req.destination, target_dmy, str(req.adults or 1),
                          bool(req.return_from),
-                         _to_datetime(req.return_from).strftime("%d-%m-%Y") if req.return_from else ""],
+                         _to_datetime(req.return_from).strftime("%d-%m-%Y") if req.return_from else "",
+                         {"M": "ECONOMY", "W": "PREMIUM_ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")],
                         )
                         # Give _on_response a moment to process
                         await asyncio.sleep(0.5)
@@ -1571,6 +1572,7 @@ class TurkishConnectorClient:
                             fc = seg.get("flightCode", {})
                             ac = fc.get("airlineCode", "TK")
                             fn = fc.get("flightNumber", "")
+                            _tk_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
                             segs.append(FlightSegment(
                                 airline=ac,
                                 airline_name="Turkish Airlines" if ac == "TK" else ac,
@@ -1580,7 +1582,7 @@ class TurkishConnectorClient:
                                 departure=_parse_tk_datetime(seg["departureDateTime"]),
                                 arrival=_parse_tk_datetime(seg["arrivalDateTime"]),
                                 duration_seconds=seg.get("journeyDurationInMillis", 0) // 1000,
-                                cabin_class="economy",
+                                cabin_class=_tk_cabin,
                                 aircraft=seg.get("equipmentName", ""),
                             ))
                         if segs:
@@ -1616,6 +1618,7 @@ class TurkishConnectorClient:
                     arr_dt = _parse_tk_datetime(seg["arrivalDateTime"])
                     dur_ms = seg.get("journeyDurationInMillis", 0)
 
+                    _tk_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
                     segments.append(FlightSegment(
                         airline=airline_code,
                         airline_name="Turkish Airlines" if airline_code == "TK" else airline_code,
@@ -1625,7 +1628,7 @@ class TurkishConnectorClient:
                         departure=dep_dt,
                         arrival=arr_dt,
                         duration_seconds=dur_ms // 1000,
-                        cabin_class="economy",
+                        cabin_class=_tk_cabin,
                         aircraft=seg.get("equipmentName", ""),
                     ))
 

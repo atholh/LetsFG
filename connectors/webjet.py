@@ -213,10 +213,11 @@ class WebjetConnectorClient:
                 f"&Outbound={origin}-{origin}-{dest}ALL-{dest}ALL-{date_compact}"
                 f"&Inbound={dest}-{dest}-{origin}ALL-{origin}ALL-{ret_compact}"
             )
+        _wj_cabin = {"M": "Economy", "W": "PremiumEconomy", "C": "Business", "F": "First"}.get(req.cabin_class or "M", "Economy")
         search_url = (
             f"https://services.webjet.com.au/web/flights/matrix/"
             f"?Adults={adults}&Children={children}&Infants={infants}"
-            f"&TravelClass=Economy&TripType={trip_type}"
+            f"&TravelClass={_wj_cabin}&TripType={trip_type}"
             f"{leg_param}"
             f"&CityCodeFrom={origin}&CityCodeTo={dest}"
         )

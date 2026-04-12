@@ -1338,7 +1338,7 @@ class AirChinaConnectorClient:
                     airline=airline_code[:2], airline_name=self.AIRLINE_NAME if airline_code == self.IATA else airline_code,
                     flight_no=flight_no or self.IATA, origin=seg.get("origin") or seg.get("departureAirport") or req.origin,
                     destination=seg.get("destination") or seg.get("arrivalAirport") or req.destination,
-                    departure=dep_dt, arrival=arr_dt, cabin_class="economy",
+                    departure=dep_dt, arrival=arr_dt, cabin_class={"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy"),
                 ))
 
             if not segments:
@@ -1508,7 +1508,7 @@ class AirChinaConnectorClient:
 
         segment = FlightSegment(
             airline=self.IATA, airline_name=self.AIRLINE_NAME, flight_no=flight_no,
-            origin=req.origin, destination=req.destination, departure=dep_dt, arrival=arr_dt, cabin_class="economy",
+            origin=req.origin, destination=req.destination, departure=dep_dt, arrival=arr_dt, cabin_class={"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy"),
         )
         route = FlightRoute(segments=[segment], total_duration_seconds=0, stopovers=0)
         return FlightOffer(

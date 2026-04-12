@@ -200,13 +200,15 @@ class TiketConnectorClient:
         children = req.children or 0
         infants = req.infants or 0
 
+        _tk_cabin = {"M": "economy", "W": "premium", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
+
         # Tiket.com search URL format
         search_url = (
             f"https://www.tiket.com/flights/search"
             f"?d={req.origin}&a={req.destination}"
             f"&date={date_str}"
             f"&adult={adults}&child={children}&infant={infants}"
-            f"&class=economy"
+            f"&class={_tk_cabin}"
         )
 
         for attempt in range(2):
@@ -422,6 +424,7 @@ class TiketConnectorClient:
         )
 
         fid = hashlib.md5(dedup.encode()).hexdigest()[:12]
+        _tk_cls = {"M": "economy", "W": "premium", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
         return FlightOffer(
             id=f"tikt_{fid}",
             price=price_f,
@@ -436,7 +439,7 @@ class TiketConnectorClient:
                 f"?d={req.origin}&a={req.destination}"
                 f"&date={dt:%Y-%m-%d}&adult={req.adults or 1}"
                 f"&child={req.children or 0}&infant={req.infants or 0}"
-                f"&class=economy"
+                f"&class={_tk_cls}"
             ),
             is_locked=False,
             source="tiket_ota",

@@ -135,11 +135,13 @@ class CheapflightsConnectorClient:
             page.on("response", on_response)
 
             dep_date = req.date_from.isoformat()
+            _cf_cabin = {"M": "e", "W": "p", "C": "b", "F": "f"}
+            cabin = _cf_cabin.get(req.cabin_class, "e") if req.cabin_class else "e"
             url = (
                 f"https://www.cheapflights.com/flight-search/"
                 f"{req.origin}-{req.destination}/{dep_date}/"
                 f"{req.adults or 1}adult"
-                f"?sort=price_a"
+                f"?sort=price_a&cabin={cabin}"
             )
 
             await page.goto(url, wait_until="domcontentloaded", timeout=25000)

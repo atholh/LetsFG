@@ -232,20 +232,24 @@ class YatraConnectorClient:
 
             # Step 2: Navigate to trigger page — try fbdom_flight (domestic) or int_one_way (intl)
             if is_domestic:
+                _yt_cabin = {"M": "Economy", "W": "Premium_Economy", "C": "Business", "F": "First"}
+                _yt_cls = _yt_cabin.get(req.cabin_class, "Economy") if req.cabin_class else "Economy"
                 trigger_url = (
                     f"https://flight.yatra.com/air-search-ui/fbdom_flight/trigger?"
                     f"ADT={req.adults or 1}&CNN=0&INF=0"
                     f"&origin={req.origin}&destination={req.destination}"
                     f"&flight_depart_date={date_encoded}&type=O"
-                    f"&viewName=normal&flexi=N&class=Economy"
+                    f"&viewName=normal&flexi=N&class={_yt_cls}"
                 )
             else:
+                _yt_cabin = {"M": "Economy", "W": "Premium_Economy", "C": "Business", "F": "First"}
+                _yt_cls = _yt_cabin.get(req.cabin_class, "Economy") if req.cabin_class else "Economy"
                 trigger_url = (
                     f"https://flight.yatra.com/air-search-ui/int_one_way/trigger?"
                     f"ADT={req.adults or 1}&CNN=0&INF=0"
                     f"&origin={req.origin}&destination={req.destination}"
                     f"&flight_depart_date={date_encoded}&type=O"
-                    f"&viewName=normal&flexi=N&class=Economy"
+                    f"&viewName=normal&flexi=N&class={_yt_cls}"
                 )
 
             logger.info("Yatra: navigating to trigger (domestic=%s)", is_domestic)
@@ -295,7 +299,7 @@ class YatraConnectorClient:
                 f"ADT={req.adults or 1}&CHD=0&CNN=0&INF=0"
                 f"&origin={req.origin}&destination={req.destination}"
                 f"&flight_depart_date={date_yatra}&type=O"
-                f"&viewName=normal&flexi=N&class=Economy"
+                f"&viewName=normal&flexi=N&class={_yt_cls}"
             )
 
             fetch_js = f"""async () => {{
@@ -506,7 +510,7 @@ class YatraConnectorClient:
                     bk_url = (
                         f"{_BASE}/air-search-ui/fbdom_flight/trigger?"
                         f"ADT={req.adults or 1}&CNN=0&INF=0&origin={req.origin}&destination={req.destination}"
-                        f"&flight_depart_date={req.date_from.strftime('%d/%m/%Y')}&type=O&viewName=normal&flexi=N&class=Economy"
+                        f"&flight_depart_date={req.date_from.strftime('%d/%m/%Y')}&type=O&viewName=normal&flexi=N&class={_yt_cls}"
                     )
 
                     offers.append(FlightOffer(

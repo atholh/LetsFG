@@ -429,13 +429,14 @@ class PegasusConnectorClient:
                     break
 
         # ── Build segments ───────────────────────────────────────────
+        _pc_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
         seg_raw = (flight.get("segmentList") or flight.get("segments")
                    or flight.get("legs") or [])
         segments: list[FlightSegment] = []
         if isinstance(seg_raw, list) and seg_raw:
             for seg in seg_raw:
                 if isinstance(seg, dict):
-                    segments.append(self._build_segment(seg, req.origin, req.destination))
+                    segments.append(self._build_segment(seg, req.origin, req.destination, _pc_cabin))
 
         # If no explicit segments, the flight itself IS the segment
         if not segments:
@@ -449,6 +450,7 @@ class PegasusConnectorClient:
             flight_no = str(flight.get("flightNo") or flight.get("flightNumber") or "").strip()
             airline = flight.get("airline") or "PC"
 
+            _pc_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
             segments.append(FlightSegment(
                 airline=airline,
                 airline_name="Pegasus Airlines",
@@ -457,7 +459,7 @@ class PegasusConnectorClient:
                 destination=dest,
                 departure=self._parse_dt(dep_dt),
                 arrival=self._parse_dt(arr_dt),
-                cabin_class="M",
+                cabin_class=_pc_cabin,
             ))
 
         total_dur = 0
@@ -516,13 +518,14 @@ class PegasusConnectorClient:
         if price <= 0:
             return None
 
+        _pc_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
         segments_raw = flight.get("segments") or flight.get("legs") or flight.get("flights") or []
         segments: list[FlightSegment] = []
         if segments_raw and isinstance(segments_raw, list):
             for seg in segments_raw:
-                segments.append(self._build_segment(seg, req.origin, req.destination))
+                segments.append(self._build_segment(seg, req.origin, req.destination, _pc_cabin))
         else:
-            segments.append(self._build_segment(flight, req.origin, req.destination))
+            segments.append(self._build_segment(flight, req.origin, req.destination, _pc_cabin))
 
         total_dur = 0
         if segments[0].departure and segments[-1].arrival:
@@ -552,7 +555,7 @@ class PegasusConnectorClient:
             source_tier="free",
         )
 
-    def _build_segment(self, seg: dict, default_origin: str, default_dest: str) -> FlightSegment:
+    def _build_segment(self, seg: dict, default_origin: str, default_dest: str, cabin_class: str = "economy") -> FlightSegment:
         dep_str = seg.get("departure") or seg.get("departureDate") or seg.get("departureTime") or seg.get("std") or ""
         arr_str = seg.get("arrival") or seg.get("arrivalDate") or seg.get("arrivalTime") or seg.get("sta") or ""
         flight_no = str(
@@ -564,7 +567,7 @@ class PegasusConnectorClient:
             airline="PC", airline_name="Pegasus Airlines", flight_no=flight_no,
             origin=origin, destination=destination,
             departure=self._parse_dt(dep_str), arrival=self._parse_dt(arr_str),
-            cabin_class="M",
+            cabin_class=cabin_class,
         )
 
     @staticmethod

@@ -142,7 +142,7 @@ class QantasConnectorClient:
                         "departureAirports": [req.origin],
                         "bestOffer": False,
                         "arrivalAirports": [
-                            {"airportCode": req.destination, "travelClass": "ECONOMY"},
+                            {"airportCode": req.destination, "travelClass": {"M": "ECONOMY", "W": "PREMIUM_ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")},
                         ],
                     }
                 },

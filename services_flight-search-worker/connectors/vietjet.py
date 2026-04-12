@@ -870,6 +870,7 @@ class VietJetConnectorClient:
 
         flight_no_raw = str(flt.get("flightNumber", ""))
         flight_no = f"{airline}{flight_no_raw}" if flight_no_raw and not flight_no_raw.startswith(airline) else flight_no_raw
+        _vj_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
 
         return FlightSegment(
             airline=airline,
@@ -879,7 +880,7 @@ class VietJetConnectorClient:
             destination=arr_airport.get("code", req.destination) if isinstance(arr_airport, dict) else req.destination,
             departure=self._parse_dt(dep_time),
             arrival=self._parse_dt(arr_time),
-            cabin_class="economy",
+            cabin_class=_vj_cabin,
         )
 
     @staticmethod

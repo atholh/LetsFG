@@ -318,9 +318,10 @@ class FrontierConnectorClient:
             except (json.JSONDecodeError, ValueError):
                 legs_raw = []
 
+        _f9_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
         segments: list[FlightSegment] = []
         for leg in legs_raw:
-            segments.append(self._build_segment(leg))
+            segments.append(self._build_segment(leg, _f9_cabin))
         if not segments:
             return None
 
@@ -377,7 +378,7 @@ class FrontierConnectorClient:
         return None
 
     @staticmethod
-    def _build_segment(leg: dict) -> FlightSegment:
+    def _build_segment(leg: dict, cabin_class: str = "economy") -> FlightSegment:
         dep_str = leg.get("departureDate") or ""
         arr_str = leg.get("arrivalDate") or ""
         flight_no = str(leg.get("flightNumber") or "")
@@ -391,7 +392,7 @@ class FrontierConnectorClient:
             destination=destination,
             departure=FrontierConnectorClient._parse_dt(dep_str),
             arrival=FrontierConnectorClient._parse_dt(arr_str),
-            cabin_class="M",
+            cabin_class=cabin_class,
         )
 
     def _build_response(

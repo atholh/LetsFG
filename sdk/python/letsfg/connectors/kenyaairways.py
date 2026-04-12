@@ -56,7 +56,7 @@ def _as_date(value):
     return value
 
 
-def _build_route(origin, destination, travel_date):
+def _build_route(origin, destination, travel_date, cabin_class: str = "economy"):
     departure_dt = datetime.combine(travel_date, dt_time(0, 0))
     segment = FlightSegment(
         airline="KQ",
@@ -69,7 +69,7 @@ def _build_route(origin, destination, travel_date):
         departure=departure_dt,
         arrival=departure_dt,
         duration_seconds=0,
-        cabin_class="economy",
+        cabin_class=cabin_class,
     )
     return FlightRoute(segments=[segment], total_duration_seconds=0, stopovers=0)
 
@@ -147,7 +147,7 @@ class KenyaAirwaysConnectorClient:
             "departure": {"start": start.isoformat(), "end": end.isoformat()},
             "budget": {"maximum": None},
             "passengers": {"adults": max(1, req.adults or 1)},
-            "travelClasses": ["ECONOMY"],
+            "travelClasses": [{"M": "ECONOMY", "W": "PREMIUM_ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")],
             "flightType": "ROUND_TRIP" if req.return_from else "ONE_WAY",
             "flexibleDates": True,
             "faresPerRoute": "10",
@@ -203,10 +203,11 @@ class KenyaAirwaysConnectorClient:
             if card["price"] <= 0:
                 continue
 
-            outbound = _build_route(req.origin, req.destination, card["departure_date"])
+            _kq_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
+            outbound = _build_route(req.origin, req.destination, card["departure_date"], _kq_cabin)
             inbound = None
             if card.get("return_date"):
-                inbound = _build_route(req.destination, req.origin, card["return_date"])
+                inbound = _build_route(req.destination, req.origin, card["return_date"], _kq_cabin)
 
             price = round(card["price"], 2)
             currency = card.get("currency") or "USD"

@@ -316,11 +316,13 @@ class AsapticketsConnectorClient:
             dep = req.date_from.strftime("%Y-%m-%d")
             adults = req.adults or 1
 
+            _at_cabin = {"M": "economy", "W": "premium", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
+
             # ASAP Tickets search URL  (Next.js routing)
             url = (
                 f"https://www.asaptickets.com/flights/"
                 f"{req.origin}-{req.destination}/{dep}"
-                f"?adults={adults}&cabin=economy"
+                f"?adults={adults}&cabin={_at_cabin}"
             )
             if req.return_from:
                 ret = req.return_from.strftime("%Y-%m-%d")

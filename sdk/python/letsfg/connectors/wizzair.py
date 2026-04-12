@@ -231,12 +231,14 @@ class WizzairConnectorClient:
                     ),
                 )
                 if data is not None:
+                    _w6_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
                     outbound = self._parse_timetable(
-                        data.get("outboundFlights") or [], req.date_from
+                        data.get("outboundFlights") or [], req.date_from, _w6_cabin
                     )
                     inbound = self._parse_timetable(
                         data.get("returnFlights") or [],
                         req.return_from if req.return_from else req.date_from,
+                        _w6_cabin,
                     )
                     offers = self._build_offers(req, outbound, inbound)
                     elapsed = time.monotonic() - t0
@@ -266,7 +268,7 @@ class WizzairConnectorClient:
     # ------------------------------------------------------------------
 
     def _parse_timetable(
-        self, flights: list[dict], target_date: datetime | object
+        self, flights: list[dict], target_date: datetime | object, cabin_class: str = "economy"
     ) -> list[dict]:
         """Parse timetableV2 flight entries into intermediate format.
 
@@ -313,7 +315,7 @@ class WizzairConnectorClient:
                             destination=arr_station,
                             departure=dep_dt,
                             arrival=dep_dt,  # timetableV2 has no arrival time
-                            cabin_class="M",
+                            cabin_class=cabin_class,
                         )
                     ],
                     total_duration_seconds=0,

@@ -63,7 +63,7 @@ def _as_date(value):
     return date.today() + timedelta(days=30)
 
 
-def _build_route(origin, destination, travel_date):
+def _build_route(origin, destination, travel_date, cabin_class: str = "economy"):
     departure_dt = datetime.combine(travel_date, dt_time(0, 0))
     segment = FlightSegment(
         airline="UL",
@@ -76,7 +76,7 @@ def _build_route(origin, destination, travel_date):
         departure=departure_dt,
         arrival=departure_dt,
         duration_seconds=0,
-        cabin_class="economy",
+        cabin_class=cabin_class,
     )
     return FlightRoute(segments=[segment], total_duration_seconds=0, stopovers=0)
 
@@ -158,7 +158,7 @@ class SrilankanConnectorClient:
             "outputCurrencies": ["USD"],
             "departure": {"start": start.isoformat(), "end": end.isoformat()},
             "passengers": {"adults": max(1, req.adults or 1)},
-            "travelClasses": ["ECONOMY"],
+            "travelClasses": [{"M": "ECONOMY", "W": "PREMIUM_ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")],
             "flightType": "ROUND_TRIP" if req.return_from else "ONE_WAY",
             "flexibleDates": True,
             "faresPerRoute": "10",
@@ -235,16 +235,17 @@ class SrilankanConnectorClient:
         for card in cards:
             if card["origin"] != req.origin or card["destination"] != req.destination:
                 continue
-            if card["price"] <= 0:
+            if card.get("price") <= 0:
                 continue
 
+            _ul_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
             outbound = _build_route(
-                req.origin, req.destination, card["departure_date"]
+                req.origin, req.destination, card["departure_date"], _ul_cabin
             )
             inbound = None
             if card.get("return_date"):
                 inbound = _build_route(
-                    req.destination, req.origin, card["return_date"]
+                    req.destination, req.origin, card["return_date"], _ul_cabin
                 )
 
             price = round(card["price"], 2)

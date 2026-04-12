@@ -202,11 +202,9 @@ class TravelokaConnectorClient:
         children = req.children or 0
         infants = req.infants or 0
 
-        cabin_map = {"economy": "ECONOMY", "premium_economy": "PREMIUM_ECONOMY",
-                     "business": "BUSINESS", "first": "FIRST"}
-        cabin = cabin_map.get(
-            getattr(req, "cabin_class", "economy") or "economy", "ECONOMY"
-        )
+        cabin_map = {"M": "ECONOMY", "W": "PREMIUM_ECONOMY",
+                     "C": "BUSINESS", "F": "FIRST"}
+        cabin = cabin_map.get(req.cabin_class, "ECONOMY") if req.cabin_class else "ECONOMY"
 
         search_url = (
             f"https://www.traveloka.com/en-id/flight/fullsearch"

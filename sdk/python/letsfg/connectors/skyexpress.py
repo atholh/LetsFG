@@ -146,8 +146,9 @@ class SkyExpressConnectorClient:
         outbound_fare = self._match_fare(calendar_payload, req.origin, req.destination, req.date_from)
         if outbound_fare is None:
             return []
+        _gq_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
 
-        outbound = self._build_route(req.origin, req.destination, req.date_from, routes_payload)
+        outbound = self._build_route(req.origin, req.destination, req.date_from, routes_payload, _gq_cabin)
         inbound = None
         total_price = outbound_fare
 
@@ -155,7 +156,7 @@ class SkyExpressConnectorClient:
             inbound_fare = self._match_fare(calendar_payload, req.destination, req.origin, req.return_from)
             if inbound_fare is None:
                 return []
-            inbound = self._build_route(req.destination, req.origin, req.return_from, routes_payload)
+            inbound = self._build_route(req.destination, req.origin, req.return_from, routes_payload, _gq_cabin)
             total_price += inbound_fare
 
         booking_url = f"{_BASE}/en#sky-search-widget"
@@ -186,6 +187,7 @@ class SkyExpressConnectorClient:
         destination: str,
         travel_date: date | datetime,
         routes_payload: list[dict],
+        cabin_class: str = "economy",
     ) -> FlightRoute:
         search_date = _as_date(travel_date)
         departure = self._best_departure_time(routes_payload, origin, destination, search_date)
@@ -200,7 +202,7 @@ class SkyExpressConnectorClient:
             departure=departure,
             arrival=departure,
             duration_seconds=0,
-            cabin_class="economy",
+            cabin_class=cabin_class,
         )
         return FlightRoute(segments=[segment], total_duration_seconds=0, stopovers=0)
 

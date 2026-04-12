@@ -135,10 +135,12 @@ class KayakConnectorClient:
             page.on("response", on_response)
 
             dep_date = req.date_from.isoformat()
+            _kayak_cabin = {"M": "e", "W": "p", "C": "b", "F": "f"}
+            cabin = _kayak_cabin.get(req.cabin_class, "e") if req.cabin_class else "e"
             url = (
                 f"https://www.kayak.com/flights/"
                 f"{req.origin}-{req.destination}/{dep_date}"
-                f"?sort=price_a"
+                f"?sort=price_a&cabin={cabin}"
             )
 
             await page.goto(url, wait_until="domcontentloaded", timeout=25000)

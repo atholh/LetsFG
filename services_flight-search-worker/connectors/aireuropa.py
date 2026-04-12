@@ -553,13 +553,14 @@ class AirEuropaConnectorClient:
                 dep_dt = self._parse_dt(dep_info.get("dateTime", ""), req.date_from)
                 arr_dt = self._parse_dt(arr_info.get("dateTime", ""), req.date_from)
 
+                _ux_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
                 segments.append(FlightSegment(
                     airline=airline_code[:2],
                     airline_name=self.AIRLINE_NAME if airline_code == self.IATA else airline_code,
                     flight_no=flight_no,
                     origin=dep_info.get("locationCode", req.origin),
                     destination=arr_info.get("locationCode", req.destination),
-                    departure=dep_dt, arrival=arr_dt, cabin_class="economy",
+                    departure=dep_dt, arrival=arr_dt, cabin_class=_ux_cabin,
                 ))
 
             if not segments:
@@ -702,9 +703,10 @@ class AirEuropaConnectorClient:
         currency = f.get("currency", self.DEFAULT_CURRENCY)
         offer_id = hashlib.md5(f"{self.IATA.lower()}_{req.origin}_{req.destination}_{dep_date}_{flight_no}_{price}".encode()).hexdigest()[:12]
 
+        _ux_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
         segment = FlightSegment(
             airline=self.IATA, airline_name=self.AIRLINE_NAME, flight_no=flight_no,
-            origin=req.origin, destination=req.destination, departure=dep_dt, arrival=arr_dt, cabin_class="economy",
+            origin=req.origin, destination=req.destination, departure=dep_dt, arrival=arr_dt, cabin_class=_ux_cabin,
         )
         route = FlightRoute(segments=[segment], total_duration_seconds=0, stopovers=0)
         return FlightOffer(

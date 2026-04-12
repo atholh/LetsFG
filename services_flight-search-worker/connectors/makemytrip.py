@@ -202,12 +202,14 @@ class MakemytripConnectorClient:
 
             # MakeMyTrip URL format
             dep = req.date_from.strftime("%d/%m/%Y")
+            _mmt_cabin = {"M": "E", "W": "PE", "C": "B", "F": "F"}
+            cabin = _mmt_cabin.get(req.cabin_class, "E") if req.cabin_class else "E"
             url = (
                 f"https://www.makemytrip.com/flights/flight-listing/"
                 f"?itinerary={req.origin}-{req.destination}-{dep}"
                 f"&tripType=O"
                 f"&paxType=A-{req.adults or 1}_C-{req.children or 0}_I-0"
-                f"&cabinClass=E"
+                f"&cabinClass={cabin}"
                 f"&sTime=1&ccde=IN&lang=eng"
             )
             if req.return_from:

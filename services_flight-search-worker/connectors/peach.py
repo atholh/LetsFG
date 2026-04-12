@@ -356,6 +356,7 @@ class PeachConnectorClient:
                 else max(int((arr_dt - dep_dt).total_seconds()), 0)
             )
 
+            _mm_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
             seg = FlightSegment(
                 airline="MM",
                 airline_name="Peach Aviation",
@@ -364,7 +365,7 @@ class PeachConnectorClient:
                 destination=req.destination,
                 departure=dep_dt,
                 arrival=arr_dt,
-                cabin_class="M",
+                cabin_class=_mm_cabin,
             )
 
             route = FlightRoute(

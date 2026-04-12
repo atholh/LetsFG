@@ -183,7 +183,7 @@ class RehlatConnectorClient:
                 "Infant": 0,
                 "Refundable": "00",
                 "PreferredAirline": "",
-                "Class": "Y",
+                "Class": {"M": "Y", "W": "W", "C": "C", "F": "F"}.get(req.cabin_class, "Y") if req.cabin_class else "Y",
                 "NonStop": None,
                 "TotalPax": (req.adults or 1) + (req.children or 0),
                 "TotalSeats": (req.adults or 1) + (req.children or 0),

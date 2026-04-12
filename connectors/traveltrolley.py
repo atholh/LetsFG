@@ -164,13 +164,15 @@ class TraveltrolleyConnectorClient:
         try:
             logger.info("TravelTrolley: searching %s→%s on %s", req.origin, req.destination, date_str)
 
+            _tt_cabin = {"M": "y", "W": "w", "C": "c", "F": "f"}.get(req.cabin_class or "M", "y")
+
             # Direct URL navigation — bypasses Blazor form fill entirely
             search_url = (
                 f"{_BASE}/flight-results"
                 f"?dcity={req.origin}&acity={req.destination}"
                 f"&ddate={date_str}"
                 f"&dairport={req.origin}&aairport={req.destination}"
-                f"&triptype={'rt' if req.return_from else 'ow'}&class=y&aqty={req.adults}&nonstop=false"
+                f"&triptype={'rt' if req.return_from else 'ow'}&class={_tt_cabin}&aqty={req.adults}&nonstop=false"
             )
             if req.return_from:
                 ret_str = req.return_from.strftime('%d/%m/%Y') if hasattr(req.return_from, 'strftime') else str(req.return_from)

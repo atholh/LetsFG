@@ -314,7 +314,7 @@ class AzulConnectorClient:
                 flight_no=f"{carrier}{flight_num}" if flight_num else "",
                 origin=origin, destination=dest,
                 departure=self._parse_dt(dep_str), arrival=self._parse_dt(arr_str),
-                cabin_class="M",
+                cabin_class={"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy"),
             ))
 
         if not segments:
@@ -376,13 +376,14 @@ class AzulConnectorClient:
 
         dep = self._parse_dt(dep_str)
         arr = self._parse_dt(arr_str)
+        _ad_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
 
         return FlightSegment(
             airline=carrier, airline_name="Azul",
             flight_no=f"{carrier}{flight_num}" if flight_num else "",
             origin=origin, destination=dest,
             departure=dep, arrival=arr,
-            cabin_class="M",
+            cabin_class=_ad_cabin,
         )
 
     @staticmethod

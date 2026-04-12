@@ -282,6 +282,7 @@ class SuperAirJetConnectorClient:
                 except (ValueError, TypeError):
                     ret_dt = None
                 if ret_dt:
+                    _iu_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
                     cheapest = min(offers, key=lambda o: o.price)
                     ib_seg = FlightSegment(
                         airline="IU",
@@ -292,7 +293,7 @@ class SuperAirJetConnectorClient:
                         departure=ret_dt,
                         arrival=ret_dt,
                         duration_seconds=0,
-                        cabin_class="economy",
+                        cabin_class=_iu_cabin,
                     )
                     ib_route = FlightRoute(segments=[ib_seg], total_duration_seconds=0, stopovers=0)
                     ib_price = cheapest.price  # estimate inbound ≈ cheapest outbound
@@ -670,6 +671,7 @@ class SuperAirJetConnectorClient:
             arr_dt += timedelta(days=1)
         duration = int((arr_dt - dep_dt).total_seconds()) if arr_dt > dep_dt else 0
 
+        _iu_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
         segment = FlightSegment(
             airline="IU",
             airline_name="Super Air Jet",
@@ -679,7 +681,7 @@ class SuperAirJetConnectorClient:
             departure=dep_dt,
             arrival=arr_dt,
             duration_seconds=duration,
-            cabin_class="economy",
+            cabin_class=_iu_cabin,
         )
         route = FlightRoute(
             segments=[segment],
@@ -754,6 +756,7 @@ class SuperAirJetConnectorClient:
             fn_m = re.search(r'\b(IU\s*\d+)\b', card_html)
             flight_no = fn_m.group(1).replace(" ", "") if fn_m else ""
 
+            _iu_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
             segment = FlightSegment(
                 airline="IU",
                 airline_name="Super Air Jet",
@@ -763,7 +766,7 @@ class SuperAirJetConnectorClient:
                 departure=dep_dt,
                 arrival=arr_dt,
                 duration_seconds=duration,
-                cabin_class="economy",
+                cabin_class=_iu_cabin,
             )
             route = FlightRoute(
                 segments=[segment],

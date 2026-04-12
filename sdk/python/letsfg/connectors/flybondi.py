@@ -392,6 +392,7 @@ class FlybondiConnectorClient:
 
         # Build segments from legs
         legs_raw = node.get("legs", [])
+        _fo_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
         segments: list[FlightSegment] = []
         for leg in legs_raw:
             segments.append(FlightSegment(
@@ -402,7 +403,7 @@ class FlybondiConnectorClient:
                 destination=leg.get("destination", node.get("destination", req.destination)),
                 departure=self._parse_dt(leg.get("departureDate", "")),
                 arrival=self._parse_dt(leg.get("arrivalDate", "")),
-                cabin_class="M",
+                cabin_class=_fo_cabin,
             ))
 
         if not segments:
@@ -415,7 +416,7 @@ class FlybondiConnectorClient:
                 destination=node.get("destination", req.destination),
                 departure=self._parse_dt(node.get("departureDate", "")),
                 arrival=self._parse_dt(node.get("arrivalDate", "")),
-                cabin_class="M",
+                cabin_class=_fo_cabin,
             ))
 
         # Total duration from node or compute from segments

@@ -432,6 +432,7 @@ class ANAConnectorClient:
 
             if best_ib_ts and best_ib_price < float("inf"):
                 ib_price = best_ib_price
+                _nh_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
                 ib_segs = []
                 for fl in best_ib_ts.get("flights", []):
                     dep = fl.get("departure", {})
@@ -447,7 +448,7 @@ class ANAConnectorClient:
                         departure=_parse_nh_datetime(dep.get("dateTime", "")),
                         arrival=_parse_nh_datetime(arr.get("dateTime", "")),
                         duration_seconds=fl.get("duration", 0),
-                        cabin_class="economy",
+                        cabin_class=_nh_cabin,
                         aircraft=fl.get("aircraftName", ""),
                     ))
                 if ib_segs:
@@ -497,6 +498,7 @@ class ANAConnectorClient:
             if not flights:
                 continue
 
+            _nh_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
             segments = []
             for flight in flights:
                 dep = flight.get("departure", {})
@@ -516,7 +518,7 @@ class ANAConnectorClient:
                         departure=_parse_nh_datetime(dep.get("dateTime", "")),
                         arrival=_parse_nh_datetime(arr.get("dateTime", "")),
                         duration_seconds=flight.get("duration", 0),
-                        cabin_class="economy",
+                        cabin_class=_nh_cabin,
                         aircraft=flight.get("aircraftName", ""),
                     )
                 )

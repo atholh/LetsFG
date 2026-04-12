@@ -181,7 +181,7 @@ class LHGroupBaseConnector:
         "origin={origin}&destination={destination}"
         "&outbound-date={date}"
         "&adults={adults}&children={children}"
-        "&infants={infants}&cabin-class=economy&trip-type=ONE_WAY"
+        "&infants={infants}&cabin-class={cabin}&trip-type=ONE_WAY"
     )
 
     def __init__(self, timeout: float = 20.0):
@@ -455,6 +455,7 @@ class LHGroupBaseConnector:
             adults=req.adults,
             children=req.children,
             infants=req.infants,
+            cabin={"M": "economy", "W": "premium-economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy"),
         )
         # Upgrade booking URL to round-trip when return date is present
         if req.return_from:

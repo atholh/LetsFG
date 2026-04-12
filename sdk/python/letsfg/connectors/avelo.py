@@ -325,6 +325,7 @@ class AveloConnectorClient:
             if not arr_time:
                 arr_time = dep_time + timedelta(seconds=duration_secs) if duration_secs else dep_time
 
+            _xp_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
             seg = FlightSegment(
                 airline="XP",
                 airline_name="Avelo Airlines",
@@ -333,7 +334,7 @@ class AveloConnectorClient:
                 destination=flight.get("destination", req.destination),
                 departure=dep_time,
                 arrival=arr_time,
-                cabin_class="M",
+                cabin_class=_xp_cabin,
             )
             route = FlightRoute(
                 segments=[seg],

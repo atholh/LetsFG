@@ -332,6 +332,7 @@ class AirArabiaConnectorClient:
                     delta = arr_dt - dep_dt
                     duration_secs = max(int(delta.total_seconds()), 0)
 
+                _g9_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
                 segment = FlightSegment(
                     airline="G9",
                     airline_name="Air Arabia",
@@ -341,7 +342,7 @@ class AirArabiaConnectorClient:
                     departure=dep_dt,
                     arrival=arr_dt,
                     duration_seconds=duration_secs,
-                    cabin_class="economy",
+                    cabin_class=_g9_cabin,
                 )
 
                 route = FlightRoute(

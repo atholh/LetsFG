@@ -118,7 +118,7 @@ async def _get_context():
                 "--no-default-browser-check",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-http2",
-                "--window-position=-2400,-2400",
+                "--window-position=100,100",
                 "--window-size=1400,900",
                 "about:blank",
             ]
@@ -204,6 +204,236 @@ async def _reset_profile():
             pass
 
 
+def _extract_api_flights(payload: dict, out: list[dict]) -> None:
+    """Extract structured flight data from Emirates search-results API JSON.
+
+    Emirates API responses vary in shape, but flight data typically appears as
+    lists of 'boundOptions', 'journeys', 'flights', or 'segments' with nested
+    departure/arrival times, flight numbers, and pricing.
+    """
+    if not isinstance(payload, dict):
+        return
+
+    # Detect currency from top-level
+    currency = ""
+    for ckey in ("currency", "saleCurrency", "pricedCurrency", "currencyCode"):
+        v = payload.get(ckey)
+        if isinstance(v, str) and len(v) == 3:
+            currency = v.upper()
+            break
+    if not currency:
+        c_obj = payload.get("currency") or payload.get("priceSummary", {}).get("currency")
+        if isinstance(c_obj, dict):
+            for ck in ("sale", "code", "currencyCode"):
+                v = c_obj.get(ck)
+                if isinstance(v, dict):
+                    v = v.get("code")
+                if isinstance(v, str) and len(v) == 3:
+                    currency = v.upper()
+                    break
+
+    # Look for flight option lists under common keys
+    option_lists = []
+    for key in ("boundOptions", "journeys", "flights", "options", "itineraries",
+                "results", "searchResults", "flightOptions", "offers"):
+        val = payload.get(key)
+        if isinstance(val, list) and val:
+            option_lists.append(val)
+    # Also check nested pageProps or data
+    for wrapper_key in ("data", "pageProps", "props", "searchData", "result"):
+        wrapper = payload.get(wrapper_key)
+        if isinstance(wrapper, dict):
+            for key in ("boundOptions", "journeys", "flights", "options", "itineraries",
+                        "results", "searchResults", "flightOptions", "offers"):
+                val = wrapper.get(key)
+                if isinstance(val, list) and val:
+                    option_lists.append(val)
+
+    for opt_list in option_lists:
+        for opt in opt_list:
+            if not isinstance(opt, dict):
+                continue
+            flight = _parse_api_option(opt, currency)
+            if flight and flight.get("price", 0) > 0:
+                out.append(flight)
+
+    if out:
+        logger.info("Emirates: extracted %d flights from API interception", len(out))
+
+
+def _parse_api_option(opt: dict, fallback_currency: str) -> Optional[dict]:
+    """Parse a single flight option from various Emirates API shapes."""
+    # Extract price
+    price = 0.0
+    for pkey in ("totalPrice", "price", "amount", "total", "fareAmount", "totalAmount"):
+        v = opt.get(pkey)
+        if isinstance(v, (int, float)) and v > 0:
+            price = float(v)
+            break
+        if isinstance(v, dict):
+            for sk in ("amount", "total", "value"):
+                sv = v.get(sk)
+                if isinstance(sv, (int, float)) and sv > 0:
+                    price = float(sv)
+                    break
+        if price > 0:
+            break
+    if price <= 0:
+        ps = opt.get("priceSummary") or opt.get("pricing") or {}
+        if isinstance(ps, dict):
+            for psk in ("total", "grandTotal", "totalAmount"):
+                pv = ps.get(psk)
+                if isinstance(pv, dict):
+                    pv = pv.get("amount")
+                if isinstance(pv, (int, float)) and pv > 0:
+                    price = float(pv)
+                    break
+    if price <= 0 or price > 50000:
+        return None
+
+    # Extract currency
+    currency = fallback_currency
+    for ck in ("currency", "currencyCode", "saleCurrency", "pricedCurrency"):
+        cv = opt.get(ck)
+        if isinstance(cv, str) and len(cv) == 3:
+            currency = cv.upper()
+            break
+
+    # Extract segments/legs
+    segments = []
+    for skey in ("segments", "legs", "flights", "boundDetails", "journeySegments"):
+        sv = opt.get(skey)
+        if isinstance(sv, list) and sv:
+            segments = sv
+            break
+    # Check outbound wrapper
+    if not segments:
+        ob = opt.get("outbound") or opt.get("bound") or opt.get("journey")
+        if isinstance(ob, dict):
+            for skey in ("segments", "legs", "flights"):
+                sv = ob.get(skey)
+                if isinstance(sv, list) and sv:
+                    segments = sv
+                    break
+
+    dep_time = "00:00"
+    arr_time = "00:00"
+    origin = ""
+    destination = ""
+    flight_no = "EK"
+    duration = 0
+    stops = 0
+    aircraft = ""
+
+    if segments:
+        stops = max(0, len(segments) - 1)
+        first = segments[0] if isinstance(segments[0], dict) else {}
+        last = segments[-1] if isinstance(segments[-1], dict) else {}
+
+        # Departure from first segment
+        for dk in ("departureTime", "departure", "departureDateTime", "depTime", "std"):
+            dv = first.get(dk)
+            if isinstance(dv, dict):
+                dv = dv.get("time") or dv.get("dateTime") or dv.get("local")
+            if isinstance(dv, str) and len(dv) >= 5:
+                # Parse HH:MM from ISO or time string
+                tm = re.search(r"(\d{2}):(\d{2})", dv)
+                if tm:
+                    dep_time = f"{tm.group(1)}:{tm.group(2)}"
+                break
+
+        # Arrival from last segment
+        for ak in ("arrivalTime", "arrival", "arrivalDateTime", "arrTime", "sta"):
+            av = last.get(ak)
+            if isinstance(av, dict):
+                av = av.get("time") or av.get("dateTime") or av.get("local")
+            if isinstance(av, str) and len(av) >= 5:
+                tm = re.search(r"(\d{2}):(\d{2})", av)
+                if tm:
+                    arr_time = f"{tm.group(1)}:{tm.group(2)}"
+                break
+
+        # Origin/destination
+        for ok in ("departure", "origin", "departureAirport", "from"):
+            ov = first.get(ok)
+            if isinstance(ov, dict):
+                ov = ov.get("code") or ov.get("iata") or ov.get("airportCode")
+            if isinstance(ov, str) and len(ov) == 3:
+                origin = ov.upper()
+                break
+        for dk in ("arrival", "destination", "arrivalAirport", "to"):
+            dv = last.get(dk)
+            if isinstance(dv, dict):
+                dv = dv.get("code") or dv.get("iata") or dv.get("airportCode")
+            if isinstance(dv, str) and len(dv) == 3:
+                destination = dv.upper()
+                break
+
+        # Flight number
+        for fk in ("flightNumber", "flightNo", "flight", "marketingFlightNumber"):
+            fv = first.get(fk)
+            if isinstance(fv, str) and fv:
+                flight_no = fv.upper()
+                break
+        carrier = first.get("carrier") or first.get("airline") or first.get("marketingCarrier")
+        if isinstance(carrier, dict):
+            carrier = carrier.get("code") or carrier.get("iata")
+        if isinstance(carrier, str) and carrier and not flight_no.startswith(carrier.upper()):
+            flight_no = f"{carrier.upper()}{flight_no.lstrip('EK')}"
+
+        # Duration
+        for durk in ("duration", "totalDuration", "journeyDuration", "elapsedTime"):
+            durv = opt.get(durk) or first.get(durk)
+            if isinstance(durv, (int, float)) and durv > 0:
+                duration = int(durv)
+                break
+            if isinstance(durv, str):
+                hm = re.search(r"(\d+)\s*[hH]\s*(\d+)", durv)
+                if hm:
+                    duration = int(hm.group(1)) * 60 + int(hm.group(2))
+                    break
+
+        # Aircraft
+        for atk in ("aircraftType", "aircraft", "equipmentType"):
+            atv = first.get(atk)
+            if isinstance(atv, dict):
+                atv = atv.get("code") or atv.get("name")
+            if isinstance(atv, str) and atv:
+                aircraft = atv
+                break
+    else:
+        # No segments — try flat fields
+        for ok in ("origin", "departure", "from"):
+            ov = opt.get(ok)
+            if isinstance(ov, str) and len(ov) == 3:
+                origin = ov.upper()
+                break
+        for dk in ("destination", "arrival", "to"):
+            dv = opt.get(dk)
+            if isinstance(dv, str) and len(dv) == 3:
+                destination = dv.upper()
+                break
+
+    return {
+        "flightNo": flight_no,
+        "depTime": dep_time,
+        "arrTime": arr_time,
+        "dateStr": "",
+        "duration": duration,
+        "durationText": "",
+        "nonstop": stops == 0,
+        "stops": stops,
+        "origin": origin,
+        "originCity": "",
+        "destination": destination,
+        "destinationCity": "",
+        "cabin": "economy",
+        "price": price,
+        "currency": currency or "AED",
+        "aircraft": aircraft,
+    }
+
+
 class EmiratesConnectorClient:
     """Emirates CDP Chrome connector — form fill + results page scraping."""
 
@@ -222,6 +452,7 @@ class EmiratesConnectorClient:
 
         # Interception state
         flexi_data: dict = {}
+        api_flights: list[dict] = []  # structured flight data from API interception
         akamai_blocked = False
         simplified_option_ids: set[str] = set()
         observed_lowest_price: float = 0.0
@@ -261,6 +492,13 @@ class EmiratesConnectorClient:
                             cur_match = re.search(r'"(?:currency|currencyCode|pricedCurrency|saleCurrency)"\s*:\s*"([A-Z]{3})"', text)
                             if cur_match:
                                 observed_currency = cur_match.group(1).upper()
+
+                        # Try to parse as structured JSON with flight data
+                        try:
+                            payload = json.loads(text)
+                            _extract_api_flights(payload, api_flights)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
 
                         amounts = []
                         for m in re.finditer(r'"(?:amount|totalAmount|totalFare|price|lowestPrice|fareAmount)"\s*:\s*([0-9]+(?:\.[0-9]+)?)', text):
@@ -352,6 +590,18 @@ class EmiratesConnectorClient:
                 logger.warning("Emirates: direct bootstrap failed: %s", e)
 
             if not direct_bootstrap_ok:
+                # Direct bootstrap failed (likely Akamai blocked) - navigate back to
+                # the booking form page before attempting form fill
+                logger.warning("Emirates: direct bootstrap failed, returning to booking form")
+                await page.goto(
+                    "https://www.emirates.com/english/book/",
+                    wait_until="domcontentloaded",
+                    timeout=45000,
+                )
+                await asyncio.sleep(2.0)
+                await _dismiss_overlays(page)
+                await asyncio.sleep(0.5)
+
                 # Step 2: Select journey type based on request
                 is_rt = req.return_from is not None
                 ok = await self._set_journey_type(page, is_rt)
@@ -471,9 +721,16 @@ class EmiratesConnectorClient:
             if not got_results:
                 logger.warning("Emirates: never reached results page (URL: %s), trying last-resort scrape", page.url[:200])
 
-            # Step 7: Scrape flight data from DOM
-            logger.warning("Emirates: reached results page, scraping...")
-            flights = await self._scrape_results(page, req)
+            # Step 7: Extract flight data — prefer API interception, fall back to DOM
+            logger.warning("Emirates: extracting results...")
+
+            # Priority 1: Use structured API interception data
+            flights = api_flights if api_flights else []
+            if flights:
+                logger.warning("Emirates: using %d flights from API interception", len(flights))
+            else:
+                # Priority 2: DOM scraping (multi-strategy)
+                flights = await self._scrape_results(page, req)
             
             # Track if we got proper structured flights (with real times) vs body-text fallback
             has_real_times = flights and any(
@@ -481,8 +738,8 @@ class EmiratesConnectorClient:
             )
 
             # For round-trip body-text fallback scrapes (no real times), multiple
-            # prices appear (one-way leg prices + RT total). Keep only the highest
-            # — most likely to be the actual RT fare.
+            # prices are extracted from the page. These are typically all RT totals
+            # for different flight/fare combinations — keep the lowest (best deal).
             # DO NOT filter proper DOM-scraped results that have real departure times.
             if (
                 flights 
@@ -490,9 +747,9 @@ class EmiratesConnectorClient:
                 and len(flights) > 1 
                 and not has_real_times
             ):
-                # Sort by price descending, keep only the highest
-                flights = sorted(flights, key=lambda f: f.get("price", 0), reverse=True)[:1]
-                logger.warning("Emirates: RT body-text fallback filter kept highest price=%s", 
+                # Sort by price ascending, keep only the lowest (cheapest RT fare)
+                flights = sorted(flights, key=lambda f: f.get("price", 0))[:1]
+                logger.warning("Emirates: RT body-text fallback filter kept lowest price=%s", 
                               flights[0].get("price") if flights else None)
 
             if not flights:
@@ -721,7 +978,7 @@ class EmiratesConnectorClient:
             "isReward": "false",
             "country": "US",
             "searchType": "BOOKING",
-            "class": "ECONOMY",
+            "class": {"M": "ECONOMY", "W": "ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY"),
             "flightSearchType": "ROUND_TRIP" if req.return_from else "ONE_WAY",
             "journeyType": "RETURN" if req.return_from else "OW",
         }
@@ -805,7 +1062,7 @@ class EmiratesConnectorClient:
                 return null;
             }""", is_rt)
 
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(1.5)
             if is_rt:
                 has_return_input = await page.evaluate("""() => {
                     const selectors = [
@@ -1197,24 +1454,215 @@ class EmiratesConnectorClient:
     # ------------------------------------------------------------------
 
     async def _scrape_results(self, page, req: Optional[FlightSearchRequest] = None) -> list[dict]:
-        """Scrape flight cards from the results page DOM."""
+        """Scrape flight cards from the results page using multiple strategies.
+
+        Strategy order (most reliable first):
+        A. __NEXT_DATA__ JSON — Next.js serialized state with full flight data
+        B. CSS-selector structured DOM — flight card elements with data attributes
+        C. Body innerText line-walk — original fragile approach (last resort)
+        """
+        # ── Strategy A: __NEXT_DATA__ JSON ──
+        next_data_flights = await page.evaluate(r"""() => {
+            try {
+                const script = document.getElementById('__NEXT_DATA__');
+                if (!script) return null;
+                const data = JSON.parse(script.textContent);
+                const results = [];
+
+                function walk(node, depth) {
+                    if (depth > 12 || !node) return;
+                    if (Array.isArray(node)) {
+                        for (const item of node) walk(item, depth + 1);
+                        return;
+                    }
+                    if (typeof node !== 'object') return;
+
+                    // Detect flight option: has price + segments/legs/departure info
+                    const hasPrice = ['totalPrice','price','amount','total','fareAmount','totalAmount']
+                        .some(k => node[k] !== undefined && node[k] !== null);
+                    const hasSegments = ['segments','legs','flights','boundDetails','journeySegments']
+                        .some(k => Array.isArray(node[k]) && node[k].length > 0);
+                    const hasDep = ['departureTime','departure','departureDateTime','depTime','std']
+                        .some(k => node[k] !== undefined);
+
+                    if (hasPrice && (hasSegments || hasDep)) {
+                        let price = 0;
+                        for (const pk of ['totalPrice','price','amount','total','fareAmount','totalAmount']) {
+                            const v = node[pk];
+                            if (typeof v === 'number' && v > 0) { price = v; break; }
+                            if (typeof v === 'object' && v) {
+                                for (const sk of ['amount','total','value']) {
+                                    if (typeof v[sk] === 'number' && v[sk] > 0) { price = v[sk]; break; }
+                                }
+                            }
+                            if (price > 0) break;
+                        }
+                        const ps = node.priceSummary || node.pricing || {};
+                        if (price <= 0 && typeof ps === 'object') {
+                            for (const psk of ['total','grandTotal','totalAmount']) {
+                                let pv = ps[psk];
+                                if (typeof pv === 'object' && pv) pv = pv.amount;
+                                if (typeof pv === 'number' && pv > 0) { price = pv; break; }
+                            }
+                        }
+                        if (price > 20 && price < 50000) {
+                            let currency = '';
+                            for (const ck of ['currency','currencyCode','saleCurrency','pricedCurrency']) {
+                                const cv = node[ck];
+                                if (typeof cv === 'string' && cv.length === 3) { currency = cv.toUpperCase(); break; }
+                            }
+
+                            // Extract first/last segment info
+                            let segs = null;
+                            for (const sk of ['segments','legs','flights','boundDetails']) {
+                                if (Array.isArray(node[sk]) && node[sk].length) { segs = node[sk]; break; }
+                            }
+                            let depTime = '00:00', arrTime = '00:00', origin = '', dest = '', flightNo = 'EK', stops = 0, aircraft = '';
+                            if (segs && segs.length) {
+                                stops = Math.max(0, segs.length - 1);
+                                const first = segs[0] || {};
+                                const last = segs[segs.length - 1] || {};
+                                for (const dk of ['departureTime','departure','departureDateTime','depTime','std']) {
+                                    let dv = first[dk];
+                                    if (typeof dv === 'object' && dv) dv = dv.time || dv.dateTime || dv.local;
+                                    if (typeof dv === 'string' && dv.length >= 5) {
+                                        const tm = dv.match(/(\d{2}):(\d{2})/);
+                                        if (tm) { depTime = tm[1]+':'+tm[2]; break; }
+                                    }
+                                }
+                                for (const ak of ['arrivalTime','arrival','arrivalDateTime','arrTime','sta']) {
+                                    let av = last[ak];
+                                    if (typeof av === 'object' && av) av = av.time || av.dateTime || av.local;
+                                    if (typeof av === 'string' && av.length >= 5) {
+                                        const tm = av.match(/(\d{2}):(\d{2})/);
+                                        if (tm) { arrTime = tm[1]+':'+tm[2]; break; }
+                                    }
+                                }
+                                for (const ok of ['departure','origin','departureAirport','from']) {
+                                    let ov = first[ok];
+                                    if (typeof ov === 'object' && ov) ov = ov.code || ov.iata || ov.airportCode;
+                                    if (typeof ov === 'string' && ov.length === 3) { origin = ov.toUpperCase(); break; }
+                                }
+                                for (const dk2 of ['arrival','destination','arrivalAirport','to']) {
+                                    let dv2 = last[dk2];
+                                    if (typeof dv2 === 'object' && dv2) dv2 = dv2.code || dv2.iata || dv2.airportCode;
+                                    if (typeof dv2 === 'string' && dv2.length === 3) { dest = dv2.toUpperCase(); break; }
+                                }
+                                for (const fk of ['flightNumber','flightNo','flight','marketingFlightNumber']) {
+                                    const fv = first[fk];
+                                    if (typeof fv === 'string' && fv) { flightNo = fv.toUpperCase(); break; }
+                                }
+                                for (const atk of ['aircraftType','aircraft','equipmentType']) {
+                                    let atv = first[atk];
+                                    if (typeof atv === 'object' && atv) atv = atv.code || atv.name;
+                                    if (typeof atv === 'string' && atv) { aircraft = atv; break; }
+                                }
+                            }
+
+                            results.push({
+                                flightNo, depTime, arrTime, dateStr: '', duration: 0,
+                                durationText: '', nonstop: stops === 0, stops,
+                                origin, originCity: '', destination: dest, destinationCity: '',
+                                cabin: 'economy', price, currency: currency || 'AED', aircraft,
+                            });
+                        }
+                        return; // don't recurse into already-processed option
+                    }
+
+                    for (const k of Object.keys(node)) walk(node[k], depth + 1);
+                }
+
+                walk(data, 0);
+                return results.length > 0 ? results : null;
+            } catch (e) { return null; }
+        }""")
+
+        if next_data_flights:
+            logger.info("Emirates: __NEXT_DATA__ extraction got %d flights", len(next_data_flights))
+            return next_data_flights
+
+        # ── Strategy B: CSS-selector structured DOM ──
+        css_flights = await page.evaluate(r"""() => {
+            const results = [];
+            // Emirates flight cards use various selectors across versions
+            const cardSelectors = [
+                '[data-auto="flight-card"]', '[data-testid="flight-card"]',
+                '.flight-card', '.bound-card', '.result-card',
+                '[class*="FlightCard"]', '[class*="flight-card"]',
+                '[class*="BoundCard"]', '[class*="bound-card"]',
+                '[class*="ResultCard"]', '[class*="result-card"]',
+                'article[class*="flight"]', 'div[class*="itinerary-card"]',
+            ];
+            let cards = [];
+            for (const sel of cardSelectors) {
+                cards = document.querySelectorAll(sel);
+                if (cards.length > 0) break;
+            }
+            if (cards.length === 0) return null;
+
+            for (const card of cards) {
+                const text = card.innerText || '';
+                // Extract times (HH:MM pattern)
+                const times = text.match(/\b(\d{1,2}:\d{2})\b/g) || [];
+                const depTime = times[0] || '00:00';
+                const arrTime = times[1] || depTime;
+                // Extract IATA codes (3-letter uppercase)
+                const iatas = text.match(/\b([A-Z]{3})\b/g) || [];
+                const uniqueIatas = [...new Set(iatas)].filter(c =>
+                    !['THE','AND','FOR','ALL','ONE','WAY','NON','HRS','MIN','AED','USD','EUR','GBP'].includes(c)
+                );
+                const origin = uniqueIatas[0] || '';
+                const dest = uniqueIatas[1] || '';
+                // Extract price
+                const priceMatch = text.match(/(AED|USD|EUR|GBP)\s*([\d,]+(?:\.\d{2})?)/i);
+                if (!priceMatch) continue;
+                const price = parseFloat(priceMatch[2].replace(/,/g, ''));
+                if (price <= 20 || price > 50000) continue;
+                // Duration
+                const durMatch = text.match(/(\d+)\s*hrs?\s*(\d+)\s*mins?/);
+                const duration = durMatch ? parseInt(durMatch[1]) * 60 + parseInt(durMatch[2]) : 0;
+                // Stops
+                const isNonstop = /non.?stop/i.test(text);
+                const stopsMatch = text.match(/(\d+)\s*stop/i);
+                const stops = isNonstop ? 0 : (stopsMatch ? parseInt(stopsMatch[1]) : 0);
+                // Flight number
+                const fnMatch = text.match(/\b(EK\s*\d{2,4})\b/i);
+                const flightNo = fnMatch ? fnMatch[1].replace(/\s/g, '').toUpperCase() : 'EK';
+                // Aircraft
+                const acMatch = text.match(/\b(A380|A350|A340|A330|B777|B787|77W|77L|388)\b/i);
+                // Cabin
+                const cabin = /business/i.test(text) ? 'business' : /first/i.test(text) ? 'first' : /premium/i.test(text) ? 'premium_economy' : 'economy';
+
+                results.push({
+                    flightNo, depTime, arrTime, dateStr: '', duration,
+                    durationText: durMatch ? durMatch[0] : '',
+                    nonstop: isNonstop, stops,
+                    origin, originCity: '', destination: dest, destinationCity: '',
+                    cabin, price, currency: priceMatch[1].toUpperCase(),
+                    aircraft: acMatch ? acMatch[1] : '',
+                });
+            }
+            return results.length > 0 ? results : null;
+        }""")
+
+        if css_flights:
+            logger.info("Emirates: CSS-selector extraction got %d flights", len(css_flights))
+            return css_flights
+
+        # ── Strategy C: Body innerText line-walk (legacy fallback) ──
         flights = await page.evaluate(r"""() => {
             const body = document.body?.innerText || '';
             if (body.includes('no flight options')) return [];
 
-            // Pre-process: join lines — merge "EUR\n332.37" → "EUR 332.37"
             const rawLines = body.split('\n').map(l => l.trim()).filter(Boolean);
             const lines = [];
             for (let k = 0; k < rawLines.length; k++) {
                 if (/^(AED|USD|EUR|GBP)$/i.test(rawLines[k]) && k + 1 < rawLines.length) {
-                    // Skip intermediate blank/whitespace-only (already filtered out)
                     let next = k + 1;
-                    // Skip "Lowest price" etc between currency and amount
                     while (next < rawLines.length && !/[\d,.]+/.test(rawLines[next]) && next < k + 4) next++;
-                    // Match amounts with decimals like "332.37" or thousands like "2,155"
                     if (next < rawLines.length && /^[\d,.]+$/.test(rawLines[next])) {
                         lines.push(rawLines[k] + ' ' + rawLines[next]);
-                        k = next; // skip the number line
+                        k = next;
                         continue;
                     }
                 }
@@ -1224,99 +1672,63 @@ class EmiratesConnectorClient:
             const results = [];
             let i = 0;
             while (i < lines.length) {
-                // Look for time pattern HH:MM
                 const timeMatch = lines[i].match(/^(\d{1,2}:\d{2})$/);
                 if (timeMatch) {
-                    // Potential flight card start — look for pattern:
-                    // [date] dep_time [date] arr_time duration stops origin city dest city class price aircraft flight_no
-                    const flight = {};
                     const depTime = timeMatch[1];
-
-                    // Look backwards for date — format can be "Wed Apr 21" or "Mon 20 Apr"
                     let dateStr = '';
                     if (i > 0 && /^\w{3}\s+\d{1,2}\s+\w{3}|^\w{3}\s+\w{3}\s+\d{1,2}/.test(lines[i-1])) {
                         dateStr = lines[i-1];
                     }
-
-                    // Look forward for arrival time
                     let j = i + 1;
                     while (j < lines.length && j < i + 3) {
-                        // Skip date lines in either format
                         if (/^\w{3}\s+\d{1,2}\s+\w{3}|^\w{3}\s+\w{3}\s+\d{1,2}/.test(lines[j])) { j++; continue; }
                         if (/^\d{1,2}:\d{2}$/.test(lines[j])) break;
                         j++;
                     }
                     if (j >= lines.length || j >= i + 3) { i++; continue; }
                     const arrTime = lines[j];
-
-                    // Duration line
                     j++;
                     const durLine = lines[j] || '';
                     const durMatch = durLine.match(/(\d+)\s*hrs?\s*(\d+)\s*mins?/);
-
-                    // Stops
                     j++;
                     const stopsLine = lines[j] || '';
                     const isNonstop = stopsLine.toLowerCase().includes('non-stop');
-
-                    // Skip "Opens a dialog" etc
                     j++;
                     while (j < lines.length && /opens|dialog/i.test(lines[j])) j++;
-
-                    // Origin IATA
                     const originIata = lines[j] || '';
                     j++;
                     const originCity = lines[j] || '';
                     j++;
-
-                    // Destination IATA
                     const destIata = lines[j] || '';
                     j++;
                     const destCity = lines[j] || '';
                     j++;
-
-                    // Cabin class
                     const cabinLine = lines[j] || '';
                     j++;
-
-                    // Price line: "from" or "EUR 332.37" or "AED 2,155"
                     let priceLine = '';
                     while (j < lines.length && j < i + 25) {
-                        if (/AED|USD|EUR|GBP/i.test(lines[j])) {
-                            priceLine = lines[j];
-                            break;
-                        }
+                        if (/AED|USD|EUR|GBP/i.test(lines[j])) { priceLine = lines[j]; break; }
                         j++;
                     }
-                    // Match prices with decimals (EUR 332.37) or thousands (AED 2,155)
                     const priceMatch = priceLine.match(/(AED|USD|EUR|GBP)\s*([\d,.]+)/i);
-
-                    // Flight number — look for EK###
                     let flightNo = '';
                     for (let k = j; k < Math.min(j + 8, lines.length); k++) {
                         const fnm = lines[k].match(/^(EK\d{2,4})$/i);
                         if (fnm) { flightNo = fnm[1]; break; }
                     }
-
-                    // Aircraft type — look nearby
                     let aircraft = '';
                     for (let k = j; k < Math.min(j + 10, lines.length); k++) {
                         if (/^(A380|A350|A340|A330|A320|B777|B787|B737|77W|77L|388)$/i.test(lines[k])) {
-                            aircraft = lines[k];
-                            break;
+                            aircraft = lines[k]; break;
                         }
                     }
-
                     if (priceMatch) {
                         results.push({
                             flightNo: (flightNo || 'EK').toUpperCase(),
-                            depTime,
-                            arrTime,
-                            dateStr,
+                            depTime, arrTime, dateStr,
                             duration: durMatch ? parseInt(durMatch[1]) * 60 + parseInt(durMatch[2]) : 0,
                             durationText: durLine,
-                            nonstop: isNonstop,
-                            stops: isNonstop ? 0 : 1,
+                            nonstop: isNonstop, stops: isNonstop ? 0 : 1,
                             origin: originIata.length === 3 ? originIata : '',
                             originCity,
                             destination: destIata.length === 3 ? destIata : '',
@@ -1336,13 +1748,11 @@ class EmiratesConnectorClient:
             return results;
         }""")
         count = len(flights) if flights else 0
-        logger.info("Emirates: scraped %d flights from DOM", count)
+        logger.info("Emirates: body-text line-walk got %d flights", count)
         if flights:
             return flights
 
-        # RT layouts can hide core card fields (flight number, route labels) but
-        # still show fares. Extract those fares from rendered body text as a
-        # last-resort fallback.
+        # ── Strategy D: Body-text price-only regex (absolute last resort) ──
         try:
             body_text = await page.inner_text("body")
         except Exception:

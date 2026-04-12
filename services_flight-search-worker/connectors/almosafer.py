@@ -171,12 +171,14 @@ class AlmosaferConnectorClient:
                 await auto_block_if_proxied(page)
             page.on("response", on_response)
 
+            _alm_cabin = {"M": "Economy", "W": "PremiumEconomy", "C": "Business", "F": "First"}.get(req.cabin_class or "M", "Economy")
+
             # Direct URL navigation — bypasses form fill + MUI modal issues
             dep_date = req.date_from.isoformat()
             pax = f"{req.adults}Adult"
             search_url = (
                 f"https://global.almosafer.com/en/flights/"
-                f"{req.origin}-{req.destination}/{dep_date}/Economy/{pax}"
+                f"{req.origin}-{req.destination}/{dep_date}/{_alm_cabin}/{pax}"
             )
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
 
@@ -336,9 +338,10 @@ class AlmosaferConnectorClient:
                     f"alm_{req.origin}{req.destination}{price}_{itin.get('id', id(itin))}".encode()
                 ).hexdigest()[:12]
 
+                _alm_cabin2 = {"M": "Economy", "W": "PremiumEconomy", "C": "Business", "F": "First"}.get(req.cabin_class or "M", "Economy")
                 book_url = (
                     f"https://global.almosafer.com/en/flights/"
-                    f"{req.origin}-{req.destination}/{date_str}/Economy/{req.adults}Adult"
+                    f"{req.origin}-{req.destination}/{date_str}/{_alm_cabin2}/{req.adults}Adult"
                 )
                 offers.append(FlightOffer(
                     id=f"alm_{oid}", price=round(price, 2), currency=str(currency),
@@ -419,13 +422,14 @@ class AlmosaferConnectorClient:
                     )]
                     route = FlightRoute(segments=segments, total_duration_seconds=max(dur, 0), stopovers=0)
                     oid = hashlib.md5(f"alm_{i}_{price}".encode()).hexdigest()[:12]
+                    _alm_cabin3 = {"M": "Economy", "W": "PremiumEconomy", "C": "Business", "F": "First"}.get(req.cabin_class or "M", "Economy")
 
                     offers.append(FlightOffer(
                         id=f"alm_{oid}", price=round(price, 2), currency=currency,
                         price_formatted=f"{price:.2f} {currency}",
                         outbound=route, inbound=None,
                         airlines=[airline], owner_airline=airline,
-                        booking_url=f"https://global.almosafer.com/en/flights/{req.origin}-{req.destination}/{date_str}/Economy/{req.adults}Adult",
+                        booking_url=f"https://global.almosafer.com/en/flights/{req.origin}-{req.destination}/{date_str}/{_alm_cabin3}/{req.adults}Adult",
                         is_locked=False, source="almosafer_ota", source_tier="free",
                     ))
                 except Exception:

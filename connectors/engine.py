@@ -231,6 +231,9 @@ from .musafir import MusafirConnectorClient
 from .akbartravels import AkbartravelsConnectorClient
 from .airasiamove import AirasiamoveConnectorClient
 from .hopper import HopperConnectorClient
+from .esky import EskyConnectorClient
+from .hkexpress import HKExpressConnectorClient
+from .aircairo import AirCairoConnectorClient
 
 from ..models.flights import AirlineSummary, FlightOffer, FlightSearchRequest, FlightSearchResponse
 
@@ -350,6 +353,70 @@ _BROWSER_SOURCES: set[str] = {
     "akbartravels_ota",
     "airasiamove_ota",
 }
+
+# Fast mode sources — OTAs, metas, and key high-volume LCCs (~25 connectors).
+# These cover 90%+ of global routes with a ~20-40s search time vs 6+ min for all connectors.
+# Includes: all OTAs, all metas, plus key direct airlines (top EU/US LCCs).
+_FAST_MODE_SOURCES: set[str] = {
+    # ── OTAs (Online Travel Agencies) ──
+    "traveloka_ota", "webjet_ota", "tiket_ota", "edreams_ota", "tripcom_ota",
+    "cleartrip_ota", "opodo_ota", "despegar_ota", "etraveli_ota", "rehlat_ota",
+    "travelstart_ota", "travix_ota", "travelup_ota", "lastminute_ota", "byojet_ota",
+    "yatra_ota", "auntbetty_ota", "flightcatchers_ota", "traveltrolley_ota",
+    "almosafer_ota", "bookingcom_ota", "musafir_ota", "akbartravels_ota",
+    "airasiamove_ota", "esky_ota",
+    # ── Meta-search aggregators ──
+    "wego_meta", "momondo_meta", "kayak_meta", "cheapflights_meta", "skyscanner_meta",
+    "aviasales_meta", "agoda_meta", "ixigo_meta", "skiplagged_meta",
+    # ── Key direct airlines (top LCCs with high route coverage) ──
+    "ryanair_direct", "wizzair_direct", "easyjet_direct", "southwest_direct",
+    "spirit_direct", "frontier_direct", "allegiant_direct", "jetblue_direct",
+    "vueling_direct", "norwegian_direct", "transavia_direct",
+    # ── Kiwi is always included (global aggregator) ──
+    "kiwi_connector",
+}
+
+# ── Cabin class support ─────────────────────────────────────────────────────
+# Economy-only connectors — airlines that genuinely have no premium cabin.
+# When the user requests cabin_class C/F/W, these connectors are skipped
+# entirely (they would only return economy results anyway).
+_ECONOMY_ONLY_SOURCES: set[str] = {
+    "ryanair_direct", "easyjet_direct", "wizzair_direct",
+    "spirit_direct", "frontier_direct", "southwest_direct", "allegiant_direct",
+    "flair_direct", "avelo_direct",
+    "flybondi_direct", "jetsmart_direct", "skyairline_direct",
+    "volaris_direct", "vivaaerobus_direct", "wingo_direct",
+    "flyadeal_direct", "airarabia_direct", "salamair_direct",
+    "indigo_direct", "spicejet_direct", "akasa_direct",
+    "cebupacific_direct", "nokair_direct", "citilink_direct",
+    "airindiaexpress_direct", "peach_direct",
+    "spring_direct", "9air_direct", "luckyair_direct",
+    "superairjet_direct", "transnusa_direct",
+    "transavia_direct", "level_direct", "volotea_direct",
+    "jet2_direct", "flyarystan_direct", "smartwings_direct",
+    "linkairways_direct", "flysafair_direct", "rex_direct",
+    "pngair_direct", "solomonairlines_direct", "samoaairways_direct",
+    "airnorth_direct", "skyexpress_direct", "iberiaexpress_direct",
+    "airpeace_direct", "usbangla_direct",
+}
+
+# Map our cabin codes (M/W/C/F) to normalized cabin strings used in FlightSegment.
+# Connectors may return varied cabin strings — this normalizes for comparison.
+_CABIN_CODE_TO_NAMES: dict[str, set[str]] = {
+    "M": {"economy", "m", "y", "eco", "coach"},
+    "W": {"premium_economy", "premium economy", "w", "premium", "premiumeconomy"},
+    "C": {"business", "c", "j", "biz", "businessclass"},
+    "F": {"first", "f", "firstclass", "first class"},
+}
+
+
+def _normalize_cabin_to_code(cabin_str: str) -> str:
+    """Convert a freeform cabin string to our standard code (M/W/C/F)."""
+    val = cabin_str.lower().strip()
+    for code, names in _CABIN_CODE_TO_NAMES.items():
+        if val in names or val == code.lower():
+            return code
+    return "M"  # default to economy for unknown values
 
 
 def _should_use_browsers() -> bool:
@@ -618,6 +685,10 @@ _DIRECT_AIRLINE_connectorS: list[tuple[str, type, float]] = [
     ("airasiamove_ota", AirasiamoveConnectorClient, 55.0),
     # ── Hopper (direct commerce API — no browser needed) ──
     ("hopper_direct", HopperConnectorClient, 25.0),
+    # ── Regional coverage expansion ──
+    ("esky_ota", EskyConnectorClient, 55.0),
+    ("hkexpress_direct", HKExpressConnectorClient, 25.0),
+    ("aircairo_direct", AirCairoConnectorClient, 45.0),
 ]
 
 
@@ -728,7 +799,7 @@ class MultiProvider:
     def _get_kiwi_connector(self) -> Optional[KiwiConnectorClient]:
         return KiwiConnectorClient(timeout=25.0)
 
-    async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+    async def search_flights(self, req: FlightSearchRequest, mode: str | None = None) -> FlightSearchResponse:
         """
         Search flights across ALL sources in parallel:
         - 1 async HTTP call to Cloud Run backend (paid APIs: Duffel, Amadeus, Sabre, etc.)
@@ -741,15 +812,25 @@ class MultiProvider:
 
         All browser instances launched by connectors are automatically
         closed after results are collected.
+
+        Args:
+            req: Flight search request with origin, destination, dates, etc.
+            mode: Search mode. None (default) = all connectors.
+                  "fast" = OTAs + metas + key LCCs only (~25 connectors, 20-40s).
         """
         try:
-            return await self._search_flights_inner(req)
+            return await self._search_flights_inner(req, mode=mode)
         finally:
             await self._cleanup_connectors()
 
-    async def _search_flights_inner(self, req: FlightSearchRequest) -> FlightSearchResponse:
+    async def _search_flights_inner(self, req: FlightSearchRequest, mode: str | None = None) -> FlightSearchResponse:
         # Clear telemetry from previous searches
         self._connector_telemetry.clear()
+
+        fast_mode = mode == "fast"
+        if fast_mode:
+            logger.info("Fast mode: using ~25 OTAs/metas/key LCCs instead of %d full connectors",
+                        len(_DIRECT_AIRLINE_connectorS))
         
         tasks = []
         providers_used = []
@@ -777,31 +858,64 @@ class MultiProvider:
         origin_country = get_country(req.origin)
         dest_country = get_country(req.destination)
 
+        # Cabin class pre-filter: skip economy-only connectors when a
+        # non-economy cabin is requested (C=business, F=first, W=premium eco).
+        cabin_filter_active = req.cabin_class and req.cabin_class != "M"
+        if cabin_filter_active:
+            logger.info("Cabin filter active: %s — skipping economy-only connectors",
+                        req.cabin_class)
+
         ryanair_connector = self._get_ryanair_connector()
         wizzair_connector = self._get_wizzair_connector()
         kiwi_connector = self._get_kiwi_connector()
 
+        # In fast mode, only include these special connectors if they're in _FAST_MODE_SOURCES
         ryanair_countries = AIRLINE_COUNTRIES.get("ryanair")
-        if ryanair_connector and (not origin_country or not dest_country or not ryanair_countries
+        if ryanair_connector and (not fast_mode or "ryanair_direct" in _FAST_MODE_SOURCES) and (
+                not cabin_filter_active or "ryanair_direct" not in _ECONOMY_ONLY_SOURCES) and (
+                not origin_country or not dest_country or not ryanair_countries
                 or (origin_country in ryanair_countries and dest_country in ryanair_countries)):
             tasks.append(self._search_ryanair_direct(ryanair_connector, req))
             providers_used.append("ryanair_direct")
 
         # Wizzair requires Chrome (CDP) — skip when browsers unavailable
         wizz_countries = AIRLINE_COUNTRIES.get("wizz")
-        if _BROWSERS_AVAILABLE and wizzair_connector and (
+        if _BROWSERS_AVAILABLE and wizzair_connector and (not fast_mode or "wizzair_direct" in _FAST_MODE_SOURCES) and (
+                not cabin_filter_active or "wizzair_direct" not in _ECONOMY_ONLY_SOURCES) and (
                 not origin_country or not dest_country or not wizz_countries
                 or (origin_country in wizz_countries and dest_country in wizz_countries)):
             tasks.append(self._search_wizzair_direct(wizzair_connector, req))
             providers_used.append("wizzair_direct")
 
-        # Kiwi is a global aggregator — always query it
-        if kiwi_connector:
+        # Kiwi is a global aggregator — always query it (always in fast mode set)
+        if kiwi_connector and (not fast_mode or "kiwi_connector" in _FAST_MODE_SOURCES):
             tasks.append(self._search_kiwi_connector(kiwi_connector, req))
             providers_used.append("kiwi_connector")
 
         # ── Direct airline website connectors (46 LCCs) — route-filtered ──
         filtered_connectors = get_relevant_connectors(req.origin, req.destination, _DIRECT_AIRLINE_connectorS)
+
+        # Cabin class pre-filter: skip economy-only connectors for non-economy cabin
+        if cabin_filter_active:
+            before_cabin = len(filtered_connectors)
+            filtered_connectors = [
+                (src, cls, t) for src, cls, t in filtered_connectors
+                if src not in _ECONOMY_ONLY_SOURCES
+            ]
+            cabin_skipped = before_cabin - len(filtered_connectors)
+            if cabin_skipped:
+                logger.info("Cabin filter: skipped %d economy-only connectors (cabin=%s)",
+                            cabin_skipped, req.cabin_class)
+
+        # Fast mode: filter to only OTAs + metas + key LCCs
+        if fast_mode:
+            before_fast = len(filtered_connectors)
+            filtered_connectors = [
+                (src, cls, t) for src, cls, t in filtered_connectors
+                if src in _FAST_MODE_SOURCES
+            ]
+            logger.info("Fast mode: filtered to %d/%d connectors",
+                        len(filtered_connectors), before_fast)
 
         # Skip browser-based connectors when Chrome is not available
         # (cloud/agent environments). API-only connectors still run.
@@ -877,6 +991,9 @@ class MultiProvider:
                 ("ryanair_direct", self._get_ryanair_connector),
                 ("kiwi_connector", self._get_kiwi_connector),
             ]:
+                # Skip economy-only connectors when cabin filter is active
+                if cabin_filter_active and label in _ECONOMY_ONLY_SOURCES:
+                    continue
                 client_out = getter()
                 client_ret = getter()
                 if client_out:
@@ -897,6 +1014,12 @@ class MultiProvider:
             return_filtered = get_relevant_connectors(
                 req.destination, req.origin, _DIRECT_AIRLINE_connectorS
             )
+            # Cabin class: skip economy-only connectors for return legs too
+            if cabin_filter_active:
+                return_filtered = [
+                    (s, c, t) for s, c, t in return_filtered
+                    if s not in _ECONOMY_ONLY_SOURCES
+                ]
             # Skip browser connectors when Chrome is not available (same as outbound)
             if not _BROWSERS_AVAILABLE:
                 return_filtered = [
@@ -944,7 +1067,7 @@ class MultiProvider:
         # are ready after GLOBAL_TIMEOUT seconds, rather than waiting forever
         # for slow browser connectors queued behind the semaphore.
         all_tasks = tasks + combo_tasks
-        GLOBAL_TIMEOUT = float(os.environ.get("LETSFG_SEARCH_TIMEOUT", "90"))
+        GLOBAL_TIMEOUT = float(os.environ.get("LETSFG_SEARCH_TIMEOUT", "180"))
         
         # Create named Task objects so we can identify which finished
         named_tasks = [asyncio.create_task(t, name=str(i)) for i, t in enumerate(all_tasks)]
@@ -1086,6 +1209,19 @@ class MultiProvider:
                 logger.info("max_stopovers=%d filter removed %d offers (%d remain)",
                             req.max_stopovers, filtered_count, len(deduped))
 
+        # ── Filter by cabin class ──────────────────────────────────────────
+        # Applied post-aggregate so ALL sources respect it.  Connectors that
+        # natively support cabin filtering already return correct results;
+        # this catches connectors that ignore cabin_class and return mixed
+        # cabin results or only economy.
+        if req.cabin_class:
+            before_count = len(deduped)
+            deduped = [o for o in deduped if self._matches_cabin(o, req.cabin_class)]
+            filtered_count = before_count - len(deduped)
+            if filtered_count:
+                logger.info("cabin_class=%s filter removed %d offers (%d remain)",
+                            req.cabin_class, filtered_count, len(deduped))
+
         # ── Route validation ───────────────────────────────────────────────
         # Reject offers where outbound origin/destination don't match the
         # requested route.  Catches connectors that return wrong routes
@@ -1177,6 +1313,11 @@ class MultiProvider:
             # Check if we have rich telemetry captured by _search_connector_generic
             if provider in self._connector_telemetry:
                 tel = self._connector_telemetry[provider]
+                # Skip 'cancelled' connectors — they never ran, just got
+                # killed by the global timeout while queued for a browser
+                # slot. Reporting them as failures poisons the health dashboard.
+                if tel.error_category == "cancelled":
+                    continue
                 connector_results.append({
                     "connector": tel.connector,
                     "ok": tel.ok,
@@ -1261,7 +1402,7 @@ class MultiProvider:
         Called after a browser-based connector finishes so its Chrome process
         is freed without waiting for the full search to complete.
         """
-        from connectors.browser import cleanup_module_browsers
+        from .browser import cleanup_module_browsers
 
         mod = sys.modules.get(type(client).__module__)
         if mod:
@@ -1279,7 +1420,7 @@ class MultiProvider:
         _nd_browser etc.) in every imported connector module and terminates them.
         Only affects processes we created — never kills the user's own Chrome.
         """
-        from connectors.browser import cleanup_module_browsers, cleanup_all_browsers
+        from .browser import cleanup_module_browsers, cleanup_all_browsers
 
         modules_to_clean = []
         seen = set()
@@ -1370,7 +1511,7 @@ class MultiProvider:
         self, client: WizzairConnectorClient, req: FlightSearchRequest
     ) -> FlightSearchResponse:
         """Search Wizzair's website API directly — definitive LCC pricing."""
-        from connectors.browser import acquire_browser_slot, release_browser_slot
+        from .browser import acquire_browser_slot, release_browser_slot
         await acquire_browser_slot()
         try:
             result = await asyncio.wait_for(
@@ -1444,7 +1585,7 @@ class MultiProvider:
         try:
             # Phase 1: acquire browser slot (generous timeout, separate from search)
             if uses_browser:
-                from connectors.browser import acquire_browser_slot
+                from .browser import acquire_browser_slot
                 logger.warning("%s waiting for browser slot…", source)
                 try:
                     await asyncio.wait_for(acquire_browser_slot(), timeout=_slot_timeout)
@@ -1490,12 +1631,17 @@ class MultiProvider:
         except BaseException as exc:
             # Catch CancelledError / KeyboardInterrupt / any crash —
             # never let one connector take down the whole search.
-            logger.warning("%s crashed: %s", source, type(exc).__name__)
-            # Record crash with error details
+            is_cancelled = isinstance(exc, (asyncio.CancelledError,))
+            if is_cancelled:
+                logger.debug("%s cancelled (global timeout)", source)
+            else:
+                logger.warning("%s crashed: %s", source, type(exc).__name__)
+            # Record error — 'cancelled' connectors never actually ran,
+            # so they must NOT poison the health dashboard.
             telemetry.ok = False
             telemetry.error_type = type(exc).__name__
             telemetry.error_message = str(exc)[:200]  # truncate long messages
-            telemetry.error_category = "crash"
+            telemetry.error_category = "cancelled" if is_cancelled else "crash"
             # Try to extract HTTP status if it's an HTTP error
             if hasattr(exc, 'response') and hasattr(exc.response, 'status_code'):
                 telemetry.http_status = exc.response.status_code
@@ -1521,7 +1667,7 @@ class MultiProvider:
                     await self._cleanup_single_connector(client)
                 except Exception:
                     pass
-                from connectors.browser import release_browser_slot
+                from .browser import release_browser_slot
                 release_browser_slot()
 
     def _combo_search_fn(self, label: str):
@@ -1611,6 +1757,36 @@ class MultiProvider:
         if code in self._CITY_AIRPORTS:
             return self._CITY_AIRPORTS[code]
         return {code}
+
+    @staticmethod
+    def _matches_cabin(offer: FlightOffer, cabin_code: str) -> bool:
+        """Check if an offer's segments match the requested cabin class.
+
+        Returns True if ANY segment in the offer matches the requested cabin,
+        OR if all segments have the default 'economy' value (connector didn't
+        report cabin class — we keep these rather than dropping valid offers
+        from connectors that simply don't report cabin info).
+        """
+        target_names = _CABIN_CODE_TO_NAMES.get(cabin_code, set())
+
+        def _route_matches(route) -> bool:
+            if route is None or not route.segments:
+                return True  # no route info → don't filter
+            all_default = all(
+                seg.cabin_class in ("economy", "M", "") or not seg.cabin_class
+                for seg in route.segments
+            )
+            if all_default:
+                # Connector didn't report cabin — can't filter, keep it.
+                # (This is the common case for connectors that hardcode "economy")
+                return True
+            # At least one segment has a non-default cabin → check if it matches
+            return any(
+                _normalize_cabin_to_code(seg.cabin_class) == cabin_code
+                for seg in route.segments
+            )
+
+        return _route_matches(offer.outbound) and _route_matches(offer.inbound)
 
     def _filter_wrong_routes(self, offers: list[FlightOffer], req: FlightSearchRequest) -> list[FlightOffer]:
         """Remove offers whose actual route doesn't match the requested origin → destination."""

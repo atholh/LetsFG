@@ -321,6 +321,7 @@ class RyanairConnectorClient:
 
             flight_no = seg.get("flightNumber", "").replace(" ", "")
 
+            _fr_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
             segments.append(FlightSegment(
                 airline="FR",
                 airline_name="Ryanair",
@@ -329,7 +330,7 @@ class RyanairConnectorClient:
                 destination=seg.get("destination", trip.get("destination", "")),
                 departure=dep_dt,
                 arrival=arr_dt,
-                cabin_class="M",
+                cabin_class=_fr_cabin,
             ))
 
         if not segments:
@@ -345,7 +346,7 @@ class RyanairConnectorClient:
                 destination=trip.get("destination", ""),
                 departure=self._parse_dt(dep_str),
                 arrival=self._parse_dt(arr_str),
-                cabin_class="M",
+                cabin_class=_fr_cabin,
             ))
 
         total_dur = 0

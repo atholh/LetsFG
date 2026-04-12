@@ -187,10 +187,11 @@ class UnitedConnectorClient:
 
             # Step 2: Navigate to FSR deep-link URL
             date_str = req.date_from.strftime("%Y-%m-%d")
+            _ua_sc = {"M": "7", "W": "7", "C": "9", "F": "10"}.get(req.cabin_class or "M", "7")
             fsr_url = (
                 f"https://www.united.com/en/us/fsr/choose-flights"
                 f"?f={req.origin}&t={req.destination}&d={date_str}"
-                f"&tt=1&sc=7&px={req.adults}&taxng=1&newHP=True"
+                f"&tt=1&sc={_ua_sc}&px={req.adults}&taxng=1&newHP=True"
                 f"&clm=7&st=bestmatches&tqp=R"
             )
             logger.info("United: navigating to FSR: %s", fsr_url)

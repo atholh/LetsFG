@@ -423,6 +423,7 @@ class LuckyAirConnectorClient:
                 f"8l_{req.origin}{req.destination}{flight_date_str}{price}".encode()
             ).hexdigest()[:12]
 
+            _8l_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
             # Build a minimal segment — calendar gives price only, not times
             dep_dt = datetime(flight_date.year, flight_date.month, flight_date.day, 0, 0)
             segment = FlightSegment(
@@ -434,7 +435,7 @@ class LuckyAirConnectorClient:
                 departure=dep_dt,
                 arrival=dep_dt,
                 duration_seconds=0,
-                cabin_class="economy",
+                cabin_class=_8l_cabin,
             )
 
             route = FlightRoute(

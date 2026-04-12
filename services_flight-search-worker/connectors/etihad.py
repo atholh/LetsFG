@@ -344,13 +344,14 @@ class EtihadConnectorClient:
                     trip_dur = 7
             else:
                 trip_dur = 0
+            _ey_cabin = {"M": "ECONOMY", "W": "ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")
             result = await page.evaluate("""async (params) => {
-                const [origin, dest, depDate, isRt, tripDur] = params;
+                const [origin, dest, depDate, isRt, tripDur, cabinCls] = params;
                 try {
                     const body = {
                         originAirportCode: origin,
                         destinationAirportCode: dest,
-                        cabinClass: 'ECONOMY',
+                        cabinClass: cabinCls,
                         tripType: isRt ? 'return' : 'oneway',
                         passengerTypeCode: 'ADT',
                         departureDate: depDate,
@@ -370,7 +371,7 @@ class EtihadConnectorClient:
                 } catch (e) {
                     return {_error: -1, _msg: e.message};
                 }
-            }""" , [api_origin, api_dest, dep, is_rt, trip_dur])
+            }""" , [api_origin, api_dest, dep, is_rt, trip_dur, _ey_cabin])
 
             if not result or result.get("_error"):
                 err = result.get("_error", "?") if result else "null"
@@ -700,6 +701,7 @@ class EtihadConnectorClient:
         if not isinstance(dep_dt, datetime):
             dep_dt = datetime(dep_dt.year, dep_dt.month, dep_dt.day)
 
+        _ey_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
         segment = FlightSegment(
             airline="EY",
             airline_name="Etihad Airways",
@@ -709,7 +711,7 @@ class EtihadConnectorClient:
             departure=dep_dt,
             arrival=dep_dt,  # time unknown from calendar API
             duration_seconds=0,
-            cabin_class="economy",
+            cabin_class=_ey_cabin,
         )
 
         route = FlightRoute(
@@ -735,7 +737,7 @@ class EtihadConnectorClient:
                 departure=rdt if isinstance(rdt, datetime) else datetime(rdt.year, rdt.month, rdt.day),
                 arrival=rdt if isinstance(rdt, datetime) else datetime(rdt.year, rdt.month, rdt.day),
                 duration_seconds=0,
-                cabin_class="economy",
+                cabin_class=_ey_cabin,
             )
             inbound = FlightRoute(segments=[ib_seg], total_duration_seconds=0, stopovers=0)
 
@@ -774,12 +776,13 @@ class EtihadConnectorClient:
         children = req.children or 0
         infants = req.infants or 0
         trip = "return" if req.return_from else "oneway"
+        _ey_booking_cabin = {"M": "Economy", "W": "Economy", "C": "Business", "F": "First"}.get(req.cabin_class or "M", "Economy")
         url = (
             f"https://www.etihad.com/en/book/flights"
             f"?from={req.origin}&to={req.destination}"
             f"&departdate={date_str}"
             f"&adult={adults}&child={children}&infant={infants}"
-            f"&class=Economy&trip={trip}"
+            f"&class={_ey_booking_cabin}&trip={trip}"
         )
         if req.return_from:
             try:

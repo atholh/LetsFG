@@ -76,7 +76,7 @@ class TravelupConnectorClient:
             "ap": str(req.adults or 1),
             "cp": str(req.children or 0),
             "ip": str(req.infants or 0),
-            "c": "1",  # economy
+            "c": {"M": "1", "W": "2", "C": "3", "F": "4"}.get(req.cabin_class or "M", "1"),  # cabin class
             "sm": "2",  # search mode
             "l": "en-GB",
             "ds": ds,

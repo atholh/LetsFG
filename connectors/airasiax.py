@@ -193,7 +193,7 @@ class AirAsiaXConnectorClient:
     async def _extract_from_dom(self, page, req: FlightSearchRequest) -> list[FlightOffer]:
         """Fallback: extract from __NEXT_DATA__ or re-parsed script tags."""
         try:
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
             data = await page.evaluate("""() => {
                 const pp = window.__NEXT_DATA__?.props?.pageProps;
                 if (pp?.aggregatorResponse) {
@@ -492,13 +492,14 @@ class AirAsiaXConnectorClient:
     @staticmethod
     def _build_search_url(req: FlightSearchRequest) -> str:
         dep = req.date_from.strftime("%d/%m/%Y")
+        _aax_cabin = {"M": "economy", "W": "premium", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
         url = (
             f"https://www.airasia.com/flights/search/"
             f"?origin={req.origin}&destination={req.destination}"
             f"&departDate={dep}&tripType={'R' if req.return_from else 'O'}"
             f"&adult={req.adults}&child=0&infant=0"
             f"&locale=en-gb&currency={req.currency}"
-            f"&airlineProfile=k,d,g&type=paired&cabinClass=economy&uce=true"
+            f"&airlineProfile=k,d,g&type=paired&cabinClass={_aax_cabin}&uce=true"
         )
         if req.return_from:
             ret = req.return_from.strftime("%d/%m/%Y") if hasattr(req.return_from, "strftime") else str(req.return_from)

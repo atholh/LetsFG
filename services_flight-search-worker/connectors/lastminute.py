@@ -578,13 +578,14 @@ class LastminuteConnectorClient:
                 route = FlightRoute(segments=segments, total_duration_seconds=total_dur_sec, stopovers=max(0, len(segments) - 1))
                 oid = hashlib.md5(f"lm_{req.origin}{req.destination}{date_str}{price}{segments[0].flight_no}".encode()).hexdigest()[:12]
 
+                _lm_cabin = {"M": "economy", "W": "premium", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
                 offers.append(FlightOffer(
                     id=f"lm_{oid}", price=round(price, 2), currency=price_currency,
                     price_formatted=f"{price:.2f} {price_currency}",
                     outbound=route, inbound=None,
                     airlines=list({s.airline for s in segments if s.airline}),
                     owner_airline=segments[0].airline if segments else "Lastminute",
-                    booking_url=f"{_BASE}/flights/{req.origin}-{req.destination}/{date_str}/1adults/economy/oneway",
+                    booking_url=f"{_BASE}/flights/{req.origin}-{req.destination}/{date_str}/1adults/{_lm_cabin}/oneway",
                     is_locked=False, source="lastminute_ota", source_tier="free",
                 ))
             except Exception as e:

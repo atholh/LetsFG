@@ -161,10 +161,12 @@ class AgodaConnectorClient:
             # If redirected away from flights, try main agoda domain
             current = page.url
             if "flights" not in current.lower():
+                _ag_cabin = {"M": "Economy", "W": "PremiumEconomy", "C": "Business", "F": "First"}.get(req.cabin_class, "Economy") if req.cabin_class else "Economy"
                 alt_url = (
                     f"https://www.agoda.com/flights/results"
                     f"?origin={req.origin}&destination={req.destination}"
-                    f"&departDate={dep_date}&adults={req.adults}&class=Economy"
+                    f"&departDate={dep_date}&adults={req.adults}"
+                    f"&class={_ag_cabin}"
                 )
                 await page.goto(alt_url, wait_until="domcontentloaded", timeout=20000)
 

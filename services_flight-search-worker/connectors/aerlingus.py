@@ -236,7 +236,7 @@ class AerLingusConnectorClient:
             "departure": {"start": start.isoformat(), "end": end.isoformat()},
             "budget": {"maximum": None},
             "passengers": {"adults": max(1, req.adults or 1)},
-            "travelClasses": ["ECONOMY"],
+            "travelClasses": [{"M": "ECONOMY", "W": "PREMIUM_ECONOMY", "C": "BUSINESS", "F": "FIRST"}.get(req.cabin_class or "M", "ECONOMY")],
             "flightType": "ROUND_TRIP" if req.return_from else "ONE_WAY",
             "flexibleDates": True,
             "faresPerRoute": "10",

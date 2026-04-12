@@ -858,7 +858,7 @@ class EasyjetConnectorClient:
             destination=flight.get("arrivalAirportCode", ""),
             departure=self._parse_dt(dep_str),
             arrival=self._parse_dt(arr_str),
-            cabin_class="M",
+            cabin_class={"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy"),
         )
 
         total_dur = int((segment.arrival - segment.departure).total_seconds())

@@ -213,10 +213,11 @@ class WebjetConnectorClient:
                 f"&Outbound={origin}-{origin}-{dest}ALL-{dest}ALL-{date_compact}"
                 f"&Inbound={dest}-{dest}-{origin}ALL-{origin}ALL-{ret_compact}"
             )
+        _wj_cabin = {"M": "Economy", "W": "PremiumEconomy", "C": "Business", "F": "First"}.get(req.cabin_class or "M", "Economy")
         search_url = (
             f"https://services.webjet.com.au/web/flights/matrix/"
             f"?Adults={adults}&Children={children}&Infants={infants}"
-            f"&TravelClass=Economy&TripType={trip_type}"
+            f"&TravelClass={_wj_cabin}&TripType={trip_type}"
             f"{leg_param}"
             f"&CityCodeFrom={origin}&CityCodeTo={dest}"
         )
@@ -418,6 +419,7 @@ class WebjetConnectorClient:
 
             airline_info = airlines_map.get(carrier) or {}
             airline_name = airline_info.get("name") or carrier
+            _wj_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
 
             segments.append(FlightSegment(
                 airline=carrier,
@@ -428,7 +430,7 @@ class WebjetConnectorClient:
                 departure=dep_time,
                 arrival=arr_time,
                 duration_seconds=dur_s,
-                cabin_class="economy",
+                cabin_class=_wj_cabin,
             ))
 
         if not segments:

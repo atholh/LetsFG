@@ -153,6 +153,7 @@ class SkyAirlineConnectorClient:
                     if _ib_best < float("inf"):
                         _ret = req.return_from
                         _ret_dt = datetime.combine(_ret, datetime.min.time()) if not isinstance(_ret, datetime) else _ret
+                        _h2_cabin = {"M": "economy", "W": "premium_economy", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
                         _ib_seg = FlightSegment(
                             airline="H2",
                             airline_name="Sky Airline",
@@ -162,7 +163,7 @@ class SkyAirlineConnectorClient:
                             departure=_ret_dt,
                             arrival=_ret_dt,
                             duration_seconds=0,
-                            cabin_class="economy",
+                            cabin_class=_h2_cabin,
                         )
                         _ib_route = FlightRoute(segments=[_ib_seg], total_duration_seconds=0, stopovers=0)
                         for _i, _o in enumerate(offers):

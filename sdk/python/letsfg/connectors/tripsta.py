@@ -302,15 +302,16 @@ class TripstaConnectorClient:
             adults = req.adults or 1
 
             # Tripsta search URL
+            _ts_cabin = {"M": "economy", "W": "premium", "C": "business", "F": "first"}.get(req.cabin_class or "M", "economy")
             url = (
                 f"https://www.tripsta.co.uk/results/flights"
-                f"/{req.origin}/{req.destination}/{dep}/{adults}/0/0/economy"
+                f"/{req.origin}/{req.destination}/{dep}/{adults}/0/0/{_ts_cabin}"
             )
             if req.return_from:
                 ret = req.return_from.strftime("%Y-%m-%d")
                 url = (
                     f"https://www.tripsta.co.uk/results/flights"
-                    f"/{req.origin}/{req.destination}/{dep}/{ret}/{adults}/0/0/economy"
+                    f"/{req.origin}/{req.destination}/{dep}/{ret}/{adults}/0/0/{_ts_cabin}"
                 )
 
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
