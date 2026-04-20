@@ -1643,6 +1643,8 @@ class MultiProvider:
         self, client: RyanairConnectorClient, req: FlightSearchRequest
     ) -> FlightSearchResponse:
         """Search Ryanair's website API directly — definitive LCC pricing."""
+        from .browser import set_current_connector
+        _ctx_token = set_current_connector("ryanair_direct")
         try:
             result = await client.search_flights(req)
             for offer in result.offers:
@@ -1656,7 +1658,8 @@ class MultiProvider:
         self, client: WizzairConnectorClient, req: FlightSearchRequest
     ) -> FlightSearchResponse:
         """Search Wizzair's website API directly — definitive LCC pricing."""
-        from .browser import acquire_browser_slot, release_browser_slot
+        from .browser import acquire_browser_slot, release_browser_slot, set_current_connector
+        _ctx_token = set_current_connector("wizzair_direct")
         await acquire_browser_slot()
         try:
             result = await asyncio.wait_for(
@@ -1689,6 +1692,8 @@ class MultiProvider:
         self, client: KiwiConnectorClient, req: FlightSearchRequest
     ) -> FlightSearchResponse:
         """Search Kiwi.com's public Skypicker API — LCCs + virtual interlining."""
+        from .browser import set_current_connector
+        _ctx_token = set_current_connector("kiwi_connector")
         try:
             result = await client.search_flights(req)
             for offer in result.offers:
@@ -1722,6 +1727,12 @@ class MultiProvider:
         _search_timeout = 90 if uses_browser else 45
         _slot_timeout = 300  # 5 min max to wait for a browser slot
         slot_acquired = False
+        
+        # Set connector context so proxy functions know which connector is active
+        from .browser import set_current_connector, _NO_PROXY_SOURCES
+        _ctx_token = set_current_connector(source)
+        if source in _NO_PROXY_SOURCES:
+            logger.debug("%s: proxy skipped (in _NO_PROXY_SOURCES)", source)
         
         # Initialize telemetry for this connector
         telemetry = ConnectorTelemetry(connector=source)

@@ -23,6 +23,7 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import itertools
 import logging
 import os
@@ -33,6 +34,96 @@ from typing import Optional
 from urllib.parse import urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
+
+# ── Per-connector proxy control ──────────────────────────────────────────────
+# The engine sets _current_connector before calling each connector's search.
+# Proxy functions check this: if the source is in _NO_PROXY_SOURCES, they
+# return None/empty — saving expensive residential proxy bandwidth on
+# connectors that work fine with a direct connection (open APIs, small
+# regionals, API-key-authenticated services).
+#
+# Override with LETSFG_FORCE_PROXY=1 to route ALL connectors through proxy.
+
+_current_connector: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_current_connector", default=""
+)
+
+# Connectors that work WITHOUT proxy (open APIs, no geo-block, no bot protection).
+# These get direct connections, saving ~40-60% of total proxy bandwidth.
+_NO_PROXY_SOURCES: frozenset[str] = frozenset({
+    # ── Direct airline APIs (public, no geo-restriction) ──
+    "ryanair_direct",
+    "aegean_direct",
+    "airbaltic_direct",
+    "flyarystan_direct",
+    "flysafair_direct",
+    "arajet_direct",
+    "spring_direct",
+    "airpeace_direct",
+    "airindiaexpress_direct",
+    "olympicair_direct",
+    "skyexpress_direct",
+
+    # ── Small regional carriers (minimal/no bot protection) ──
+    "aircairo_direct",
+    "transnusa_direct",
+    "superairjet_direct",
+    "solomonairlines_direct",
+    "samoaairways_direct",
+    "linkairways_direct",
+    "pngair_direct",
+    "aircalin_direct",
+    "airvanuatu_direct",
+    "airtahitinui_direct",
+    "airgreenland_direct",
+    "airniugini_direct",
+    "airnorth_direct",
+    "airseychelles_direct",
+    "caribbeanairlines_direct",
+    "pngair_direct",
+    "rex_direct",
+
+    # ── API-key-authenticated services (proxy not needed) ──
+    "kiwi_connector",
+    "serpapi_google_meta",
+    "etraveli_meta",
+    "cleartrip_ota",
+    "hopper_ota",
+
+    # ── Airlines with open APIs (no residential IP needed) ──
+    "nokair_direct",
+    "jejuair_direct",
+    "biman_direct",
+    "rwandair_direct",
+    "salamair_direct",
+    "cyprusairways_direct",
+    "azoresairlines_direct",
+    "flybondi_direct",
+    "skyairline_direct",
+    "starlux_direct",
+    "flair_direct",
+
+    # ── Nodriver connectors (own anti-bot bypass, proxy hurts) ──
+    "nh_direct",
+})
+
+
+def set_current_connector(source: str) -> contextvars.Token:
+    """Set the active connector name (called by engine before dispatch).
+
+    Returns a token for resetting via _current_connector.reset(token).
+    """
+    return _current_connector.set(source)
+
+
+def _proxy_skipped_for_current() -> bool:
+    """Check if proxy should be skipped for the currently-running connector."""
+    if os.environ.get("LETSFG_FORCE_PROXY", "").strip().lower() in ("1", "true", "yes"):
+        return False  # Force proxy for all connectors
+    source = _current_connector.get("")
+    if not source:
+        return False  # No context = use proxy (safe default)
+    return source in _NO_PROXY_SOURCES
 
 # ── Concurrency gate — limits how many browsers can run at once ──────────────
 # Without this, 20+ Chrome processes spawn simultaneously and crash the machine.
@@ -200,6 +291,8 @@ def get_proxy(env_var: str) -> Optional[dict]:
     Returns a dict suitable for ``pw.chromium.launch(proxy=...)``,
     or *None* when no proxy is configured.
     """
+    if _proxy_skipped_for_current():
+        return None
     raw = os.environ.get(env_var, "").strip()
     if not raw:
         raw = os.environ.get("LETSFG_PROXY", "").strip()
@@ -264,6 +357,8 @@ def _rotating_proxy_url() -> str:
 
 def get_default_proxy() -> Optional[dict]:
     """Return the global Playwright proxy dict from ``LETSFG_PROXY``, or None."""
+    if _proxy_skipped_for_current():
+        return None
     return _parse_proxy_url(_rotating_proxy_url())
 
 
@@ -280,6 +375,8 @@ def get_httpx_proxy_url() -> Optional[str]:
 
         httpx.AsyncClient(proxy=get_httpx_proxy_url())
     """
+    if _proxy_skipped_for_current():
+        return None
     url = _rotating_proxy_url()
     return url or None
 
@@ -292,6 +389,8 @@ def get_curl_cffi_proxies() -> Optional[dict]:
 
         cffi_requests.Session(proxies=get_curl_cffi_proxies())
     """
+    if _proxy_skipped_for_current():
+        return None
     url = _rotating_proxy_url()
     if not url:
         return None
@@ -305,9 +404,12 @@ def proxy_chrome_args() -> list[str]:
 
         args = [chrome, ..., *proxy_chrome_args(), ...]
 
-    Returns empty list when ``LETSFG_PROXY`` is not set.
+    Returns empty list when ``LETSFG_PROXY`` is not set or when the
+    current connector is in ``_NO_PROXY_SOURCES``.
     Rotates port when ``LETSFG_PROXY_PORT_RANGE`` is set.
     """
+    if _proxy_skipped_for_current():
+        return []
     raw = _rotating_proxy_url()
     if not raw:
         return []
