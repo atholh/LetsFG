@@ -18,7 +18,7 @@ import time
 from datetime import datetime, date as date_type
 from typing import Any, Optional
 
-from ..models.flights import (
+from letsfg.models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -98,55 +98,44 @@ class OpodoConnectorClient:
     async def _do_search(
         self, req: FlightSearchRequest
     ) -> list[FlightOffer] | None:
-        from playwright.async_api import async_playwright
+        from .browser import inject_stealth_js, auto_block_if_proxied
+        from .edreams import _get_browser as _get_edreams_browser, _reset_chrome_profile
 
         graphql_data: list[dict] = []
+        blocked = False
 
         async def on_response(response):
+            nonlocal blocked
             if "graphql" not in response.url:
                 return
             try:
-                if response.status == 200:
-                    body = await response.text()
-                    if len(body) > 50000:
-                        data = json.loads(body)
-                        si = data.get("data", {}).get("searchItinerary")
-                        if si and si.get("itineraries"):
-                            graphql_data.append(si)
+                if response.status == 403:
+                    blocked = True
+                    return
+                if response.status != 200:
+                    return
+                body = await response.text()
+                if len(body) < 3000:
+                    return
+                data = json.loads(body)
+                si = data.get("data", {}).get("searchItinerary")
+                if si and si.get("itineraries"):
+                    graphql_data.append(si)
             except Exception:
                 pass
 
-        pw = await async_playwright().start()
         try:
-            import os
-            # Strip proxy env vars from browser subprocess — Chromium reads HTTP_PROXY/HTTPS_PROXY
-            # and get_proxy() falls back to LETSFG_PROXY which causes ERR_TUNNEL_CONNECTION_FAILED
-            # for opodo.co.uk. Engine.py handles proxy retry externally; the patch just goes direct.
-            _PROXY_ENV_KEYS = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY",
-                               "http_proxy", "https_proxy", "all_proxy", "ftp_proxy",
-                               "LETSFG_PROXY", "ODIGEO_PROXY", "OPODO_PROXY"}
-            clean_env = {k: v for k, v in os.environ.items() if k not in _PROXY_ENV_KEYS}
-            launch_kw: dict = {
-                "headless": False,
-                "env": clean_env,
-                "args": [
-                    "--window-position=-2400,-2400",
-                    "--window-size=1366,768",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                ],
-            }
-            browser = await pw.chromium.launch(**launch_kw)
+            browser = await _get_edreams_browser()
             ctx = await browser.new_context(
                 viewport={"width": 1366, "height": 768},
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
+                    "Chrome/135.0.0.0 Safari/537.36"
                 ),
             )
             page = await ctx.new_page()
-            from .browser import auto_block_if_proxied
+            await inject_stealth_js(page)
             await auto_block_if_proxied(page)
             page.on("response", on_response)
 
@@ -182,22 +171,21 @@ class OpodoConnectorClient:
                 except Exception:
                     pass
 
-            for _ in range(6):
+            for _ in range(7):
                 await page.wait_for_timeout(5000)
-                if graphql_data:
+                if graphql_data or blocked:
                     break
 
             await page.close()
             await ctx.close()
-            await browser.close()
         except Exception as e:
             logger.error("OPODO browser error: %s", e)
             return None
-        finally:
-            try:
-                await pw.stop()
-            except Exception:
-                pass
+
+        if blocked:
+            logger.warning("OPODO: bot protection blocked, resetting profile")
+            await _reset_chrome_profile()
+            return None
 
         if not graphql_data:
             logger.warning("OPODO: no GraphQL searchItinerary captured")

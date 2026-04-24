@@ -21,7 +21,7 @@ import time
 from datetime import datetime, date as date_type
 from typing import Any, Optional
 
-from ..models.flights import (
+from letsfg.models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -32,6 +32,26 @@ from ..models.flights import (
 from .browser import get_proxy
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_booking_holdings_payload(data: dict) -> dict | None:
+    """Find the poll payload with results+legs across known wrapper shapes."""
+    if not isinstance(data, dict):
+        return None
+
+    candidates: list[dict] = [data]
+    for key in ("data", "search", "state", "payload", "result"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            candidates.append(value)
+
+    for candidate in candidates:
+        results = candidate.get("results")
+        legs = candidate.get("legs")
+        if isinstance(results, list) and results and legs:
+            return candidate
+
+    return None
 
 
 def _parse_dt(s: Any) -> datetime:
@@ -90,24 +110,25 @@ class MomondoConnectorClient:
         self, req: FlightSearchRequest
     ) -> list[FlightOffer] | None:
         from playwright.async_api import async_playwright
+        from .browser import inject_stealth_js
 
         api_responses: list[dict] = []
 
         async def on_response(response):
             url = response.url
             # Momondo polls /i/api/search/dynamic/flights/poll for results
-            if "/flights/poll" not in url and "/flights/results" not in url:
+            if "/flights/poll" not in url and "/flights/results" not in url and "/i/api/search/dynamic/flights/" not in url:
                 return
             try:
-                if response.status == 200:
-                    ct = response.headers.get("content-type", "")
-                    if "json" not in ct:
-                        return
-                    body = await response.text()
-                    if len(body) > 5000:
-                        data = json.loads(body)
-                        if data.get("results") and data.get("legs"):
-                            api_responses.append(data)
+                if response.status != 200:
+                    return
+                body = await response.text()
+                if len(body) < 800:
+                    return
+                data = json.loads(body)
+                payload = _extract_booking_holdings_payload(data)
+                if payload is not None:
+                    api_responses.append(payload)
             except Exception:
                 pass
 
@@ -120,6 +141,7 @@ class MomondoConnectorClient:
                     "--window-position=-2400,-2400",
                     "--window-size=1366,768",
                     "--disable-blink-features=AutomationControlled",
+                    "--disable-http2",
                 ],
             }
             if proxy:
@@ -134,6 +156,7 @@ class MomondoConnectorClient:
                 ),
             )
             page = await ctx.new_page()
+            await inject_stealth_js(page)
             from .browser import auto_block_if_proxied
             await auto_block_if_proxied(page)
             page.on("response", on_response)
@@ -152,11 +175,11 @@ class MomondoConnectorClient:
             await page.goto(url, wait_until="domcontentloaded", timeout=25000)
 
             # Momondo progressively polls for results (multiple poll rounds)
-            for _ in range(10):
+            for _ in range(14):
                 await page.wait_for_timeout(3000)
-                if len(api_responses) >= 2:
-                    # Wait for more poll rounds
-                    await page.wait_for_timeout(5000)
+                if api_responses:
+                    # Wait for a richer poll payload.
+                    await page.wait_for_timeout(4000)
                     break
 
             await page.close()

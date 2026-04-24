@@ -322,6 +322,56 @@ def proxy_is_configured() -> bool:
     return bool(os.environ.get("LETSFG_PROXY", "").strip())
 
 
+def bandwidth_saving_args() -> list[str]:
+    """Chrome args to block images and web fonts at the engine level.
+
+    Saves ~20-30% proxy bandwidth per page load. Images are never needed
+    for flight search scraping. Web fonts fall back to system fonts.
+
+    These are Blink engine-level flags — zero overhead, undetectable by
+    anti-bot systems (unlike page.route interception).
+    """
+    return [
+        "--blink-settings=imagesEnabled=false",
+        "--disable-remote-fonts",
+    ]
+
+
+def disable_background_networking_args() -> list[str]:
+    """Chrome args to disable background network requests.
+
+    Stops Chrome from phoning home to Google services, which can burn
+    gigabytes of proxy bandwidth over time.
+    """
+    return [
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-domain-reliability",
+        "--disable-sync",
+        "--metrics-recording-only",
+        "--disable-features=OptimizationHints",
+    ]
+
+
+def patchright_bandwidth_args() -> list[str]:
+    """Chrome launch args for patchright connectors to save proxy bandwidth.
+
+    Combines image/font blocking (Blink engine level) with background
+    networking suppression. All undetectable by anti-bot systems.
+
+    Usage in patchright connectors::
+
+        from .browser import patchright_bandwidth_args
+        browser = await pw.chromium.launch(
+            args=[*patchright_bandwidth_args(), ...],
+        )
+    """
+    return [
+        *bandwidth_saving_args(),
+        *disable_background_networking_args(),
+    ]
+
+
 # ── Resource blocking — saves bandwidth when routing through residential proxy ──
 
 # Resource types to always block (saves ~80% bandwidth)
@@ -458,6 +508,31 @@ async def auto_block_if_proxied(page) -> None:
     Also blocks images, video, fonts, analytics, tracking, ads, and social widgets.
     """
     await page.route("**/*", _aggressive_block_handler)
+
+
+# CDP URL patterns for Network.setBlockedURLs (undetectable blocking)
+_CDP_BLOCKED_URL_PATTERNS = list(_BLOCKED_URL_PATTERNS)
+
+
+async def apply_cdp_url_blocking(page) -> bool:
+    """Block analytics/tracking URLs via CDP Network.setBlockedURLs.
+
+    Unlike ``page.route()``, this is **undetectable** by anti-bot systems
+    (Akamai, PerimeterX, Cloudflare) because blocking happens inside
+    Chrome's network stack with no JavaScript roundtrip.
+
+    Safe to call on every page regardless of WAF protection level.
+    Returns True if blocking was applied, False if CDP session unavailable.
+    """
+    try:
+        client = await page.context.new_cdp_session(page)
+        await client.send("Network.setBlockedURLs", {
+            "urls": _CDP_BLOCKED_URL_PATTERNS,
+        })
+        await client.send("Network.enable")
+        return True
+    except Exception:
+        return False
 
 
 # ── Anti-bot stealth injection ──────────────────────────────────────────────────

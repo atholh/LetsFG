@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import sys
+import tempfile
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -808,6 +811,158 @@ class MultiProvider:
         # Per-connector telemetry for the current search
         # Populated during search, sent to backend after completion
         self._connector_telemetry: dict[str, ConnectorTelemetry] = {}
+        # Short-lived connector snapshots avoid rerunning expensive browser
+        # searches for identical repeated requests on warm worker instances.
+        self._connector_snapshot_mem: dict[str, dict[str, Any]] = {}
+        self._connector_snapshot_dir = self._default_snapshot_root() / "connector"
+
+    @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _env_int(name: str, default: int, minimum: int = 0) -> int:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return parsed if parsed >= minimum else default
+
+    @staticmethod
+    def _default_snapshot_root() -> Path:
+        explicit = os.environ.get("LETSFG_SNAPSHOT_CACHE_DIR", "").strip()
+        if explicit:
+            return Path(explicit)
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            return Path(local_app_data) / "letsfg" / "snapshots"
+        return Path(tempfile.gettempdir()) / "letsfg-snapshots"
+
+    @staticmethod
+    def _build_connector_snapshot_key(source: str, req: FlightSearchRequest) -> str:
+        payload = {
+            "source": source,
+            "origin": req.origin,
+            "destination": req.destination,
+            "date_from": str(req.date_from),
+            "date_to": str(req.date_to) if req.date_to else "",
+            "return_from": str(req.return_from) if req.return_from else "",
+            "return_to": str(req.return_to) if req.return_to else "",
+            "adults": req.adults,
+            "children": req.children,
+            "infants": req.infants,
+            "cabin_class": req.cabin_class or "",
+            "currency": req.currency,
+            "max_stopovers": req.max_stopovers,
+        }
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
+        return f"{source}__{digest}"
+
+    def _prune_connector_cache(self) -> None:
+        max_entries = self._env_int("LETSFG_CONNECTOR_CACHE_MAX_ENTRIES", 512, minimum=1)
+        if len(self._connector_snapshot_mem) <= max_entries:
+            return
+        excess = len(self._connector_snapshot_mem) - max_entries
+        oldest = sorted(
+            self._connector_snapshot_mem.items(),
+            key=lambda item: float(item[1].get("ts", 0.0)),
+        )[:excess]
+        for key, _ in oldest:
+            self._connector_snapshot_mem.pop(key, None)
+
+    def _read_connector_snapshot_entry(self, key: str) -> dict[str, Any] | None:
+        in_mem = self._connector_snapshot_mem.get(key)
+        if isinstance(in_mem, dict):
+            return in_mem
+
+        if not self._env_bool("LETSFG_SNAPSHOT_CACHE_DISK_ENABLED", True):
+            return None
+
+        path = self._connector_snapshot_dir / f"{key}.json"
+        if not path.exists():
+            return None
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(loaded, dict) or not isinstance(loaded.get("response"), dict):
+            return None
+        self._connector_snapshot_mem[key] = loaded
+        self._prune_connector_cache()
+        return loaded
+
+    def _write_connector_snapshot_entry(self, key: str, response: FlightSearchResponse) -> None:
+        entry: dict[str, Any] = {
+            "ts": time.time(),
+            "response": response.model_dump(mode="json"),
+        }
+        self._connector_snapshot_mem[key] = entry
+        self._prune_connector_cache()
+
+        if not self._env_bool("LETSFG_SNAPSHOT_CACHE_DISK_ENABLED", True):
+            return
+
+        path = self._connector_snapshot_dir / f"{key}.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(entry, separators=(",", ":")), encoding="utf-8")
+            os.replace(tmp_path, path)
+        except Exception:
+            pass
+
+    def _load_connector_snapshot_response(
+        self, key: str, max_age_sec: int,
+    ) -> tuple[FlightSearchResponse, int] | None:
+        entry = self._read_connector_snapshot_entry(key)
+        if not entry:
+            return None
+        try:
+            age_sec = int(max(0, time.time() - float(entry.get("ts", 0.0))))
+        except Exception:
+            return None
+        if age_sec > max_age_sec:
+            return None
+        payload = entry.get("response")
+        if not isinstance(payload, dict):
+            return None
+        try:
+            return FlightSearchResponse(**payload), age_sec
+        except Exception:
+            return None
+
+    def _try_connector_stale_fallback(
+        self, source: str, cache_key: str, reason: str,
+    ) -> tuple[FlightSearchResponse | None, int]:
+        if not self._env_bool("LETSFG_CONNECTOR_CACHE_ENABLED", True):
+            return None, 0
+        if not self._env_bool("LETSFG_CONNECTOR_STALE_FALLBACK_ENABLED", True):
+            return None, 0
+
+        stale_ttl = self._env_int("LETSFG_CONNECTOR_STALE_TTL_SEC", 21600, minimum=1)
+        hit = self._load_connector_snapshot_response(cache_key, max_age_sec=stale_ttl)
+        if not hit:
+            return None, 0
+
+        response, age_sec = hit
+        if not response.offers:
+            return None, age_sec
+
+        logger.warning(
+            "%s: %s — using stale connector snapshot (%d offers, age=%ds)",
+            source,
+            reason,
+            response.total_results,
+            age_sec,
+        )
+        return response, age_sec
 
     # ── Backend availability ─────────────────────────────────────────────
 
@@ -1638,6 +1793,47 @@ class MultiProvider:
         # Initialize telemetry for this connector
         telemetry = ConnectorTelemetry(connector=source)
         start_time = time.monotonic()
+        connector_cache_enabled = self._env_bool("LETSFG_CONNECTOR_CACHE_ENABLED", True)
+        connector_cache_key = self._build_connector_snapshot_key(source, req)
+        connector_cache_ttl = self._env_int("LETSFG_CONNECTOR_CACHE_TTL_SEC", 1200, minimum=1)
+        connector_empty_cache_enabled = self._env_bool("LETSFG_CONNECTOR_CACHE_EMPTY_ENABLED", True)
+        connector_empty_cache_ttl = self._env_int("LETSFG_CONNECTOR_CACHE_EMPTY_TTL_SEC", 300, minimum=1)
+
+        def _cache_empty_browser_result() -> None:
+            if connector_cache_enabled and uses_browser and connector_empty_cache_enabled:
+                self._write_connector_snapshot_entry(connector_cache_key, _empty)
+
+        if (uses_browser and connector_cache_enabled
+                and self._env_bool("LETSFG_CONNECTOR_CACHE_SKIP_LIVE_BROWSER", True)):
+            fresh_hit = self._load_connector_snapshot_response(
+                connector_cache_key,
+                max_age_sec=max(connector_cache_ttl, connector_empty_cache_ttl),
+            )
+            cached_result = None
+            age_sec = 0
+            if fresh_hit:
+                cached_result, age_sec = fresh_hit
+                is_empty_snapshot = cached_result.total_results <= 0
+                allowed_ttl = connector_empty_cache_ttl if is_empty_snapshot else connector_cache_ttl
+                if is_empty_snapshot and not connector_empty_cache_enabled:
+                    cached_result = None
+                elif age_sec > allowed_ttl:
+                    cached_result = None
+
+            if fresh_hit and cached_result is not None:
+                telemetry.ok = True
+                telemetry.offers = cached_result.total_results
+                telemetry.latency_ms = int((time.monotonic() - start_time) * 1000)
+                telemetry.error_category = "snapshot_hit"
+                self._connector_telemetry[source] = telemetry
+                logger.info(
+                    "%s: connector snapshot hit (%d offers, age=%ds, kind=%s) — skipping live browser run",
+                    source,
+                    cached_result.total_results,
+                    age_sec,
+                    "empty" if cached_result.total_results <= 0 else "offers",
+                )
+                return cached_result
         
         try:
             # Phase 1: acquire browser slot (generous timeout, separate from search)
@@ -1648,6 +1844,22 @@ class MultiProvider:
                     await asyncio.wait_for(acquire_browser_slot(), timeout=_slot_timeout)
                 except asyncio.TimeoutError:
                     logger.warning("%s gave up waiting for browser slot after %ds", source, _slot_timeout)
+                    fallback, age_sec = self._try_connector_stale_fallback(
+                        source,
+                        connector_cache_key,
+                        f"browser slot timeout after {_slot_timeout}s",
+                    )
+                    if fallback is not None:
+                        telemetry.ok = True
+                        telemetry.offers = fallback.total_results
+                        telemetry.error_type = "TimeoutError"
+                        telemetry.error_message = (
+                            f"Used stale snapshot ({age_sec}s old) after browser slot timeout"
+                        )
+                        telemetry.error_category = "stale_snapshot_fallback"
+                        telemetry.latency_ms = int((time.monotonic() - start_time) * 1000)
+                        self._connector_telemetry[source] = telemetry
+                        return fallback
                     # Record slot timeout
                     telemetry.ok = False
                     telemetry.error_type = "TimeoutError"
@@ -1655,6 +1867,7 @@ class MultiProvider:
                     telemetry.error_category = "slot_timeout"
                     telemetry.latency_ms = int((time.monotonic() - start_time) * 1000)
                     self._connector_telemetry[source] = telemetry
+                    _cache_empty_browser_result()
                     return _empty
                 slot_acquired = True
                 logger.warning("%s got browser slot, starting search", source)
@@ -1666,6 +1879,12 @@ class MultiProvider:
             for offer in result.offers:
                 offer.source = source
                 offer.source_tier = "free"
+
+            if connector_cache_enabled and (
+                result.offers
+                or (uses_browser and connector_empty_cache_enabled)
+            ):
+                self._write_connector_snapshot_entry(connector_cache_key, result)
             
             # Record success
             telemetry.ok = True
@@ -1676,6 +1895,20 @@ class MultiProvider:
             
         except asyncio.TimeoutError:
             logger.warning("%s timed out after %ds", source, _search_timeout)
+            fallback, age_sec = self._try_connector_stale_fallback(
+                source,
+                connector_cache_key,
+                f"search timeout after {_search_timeout}s",
+            )
+            if fallback is not None:
+                telemetry.ok = True
+                telemetry.offers = fallback.total_results
+                telemetry.error_type = "TimeoutError"
+                telemetry.error_message = f"Used stale snapshot ({age_sec}s old) after search timeout"
+                telemetry.error_category = "stale_snapshot_fallback"
+                telemetry.latency_ms = int((time.monotonic() - start_time) * 1000)
+                self._connector_telemetry[source] = telemetry
+                return fallback
             # Record search timeout
             telemetry.ok = False
             telemetry.error_type = "TimeoutError"
@@ -1683,6 +1916,7 @@ class MultiProvider:
             telemetry.error_category = "search_timeout"
             telemetry.latency_ms = int((time.monotonic() - start_time) * 1000)
             self._connector_telemetry[source] = telemetry
+            _cache_empty_browser_result()
             return _empty
             
         except BaseException as exc:
@@ -1693,6 +1927,22 @@ class MultiProvider:
                 logger.debug("%s cancelled (global timeout)", source)
             else:
                 logger.warning("%s crashed: %s", source, type(exc).__name__)
+            fallback, age_sec = self._try_connector_stale_fallback(
+                source,
+                connector_cache_key,
+                f"connector error ({type(exc).__name__})",
+            )
+            if fallback is not None:
+                telemetry.ok = True
+                telemetry.offers = fallback.total_results
+                telemetry.error_type = type(exc).__name__
+                telemetry.error_message = (
+                    f"Used stale snapshot ({age_sec}s old) after {type(exc).__name__}"
+                )
+                telemetry.error_category = "stale_snapshot_fallback"
+                telemetry.latency_ms = int((time.monotonic() - start_time) * 1000)
+                self._connector_telemetry[source] = telemetry
+                return fallback
             # Record error — 'cancelled' connectors never actually ran,
             # so they must NOT poison the health dashboard.
             telemetry.ok = False
@@ -1708,6 +1958,7 @@ class MultiProvider:
                 telemetry.error_category = "http_error"
             telemetry.latency_ms = int((time.monotonic() - start_time) * 1000)
             self._connector_telemetry[source] = telemetry
+            _cache_empty_browser_result()
             return FlightSearchResponse(
                 search_id="", origin=req.origin, destination=req.destination,
                 currency=req.currency, offers=[], total_results=0,

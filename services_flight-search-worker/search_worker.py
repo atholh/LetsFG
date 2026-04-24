@@ -77,6 +77,9 @@ CALLBACK_SECRET = os.environ.get("CALLBACK_SECRET", "")
 CONNECTOR_WORKER_URL = os.environ.get("CONNECTOR_WORKER_URL", "")
 CONNECTOR_WORKER_SECRET = os.environ.get("CONNECTOR_WORKER_SECRET", "")
 FANOUT_TIMEOUT = float(os.environ.get("FANOUT_TIMEOUT", "180"))
+FANOUT_MAX_PARALLEL = max(1, int(os.environ.get("FANOUT_MAX_PARALLEL", "20")))
+FANOUT_MAX_RETRIES = max(0, int(os.environ.get("FANOUT_MAX_RETRIES", "3")))
+FANOUT_RAMP_DELAY_SECONDS = max(0.0, float(os.environ.get("FANOUT_RAMP_DELAY_SECONDS", "0.05")))
 
 
 # ── Currency normalization ──────────────────────────────────────────────────
@@ -866,12 +869,29 @@ async def _search_local(
     if CONNECTOR_WORKER_SECRET:
         headers["Authorization"] = f"Bearer {CONNECTOR_WORKER_SECRET}"
 
+    max_parallel = max(1, min(FANOUT_MAX_PARALLEL, len(tasks)))
+    logger.info("Fan-out throttle: max_parallel=%d retries=%d ramp_delay=%.2fs",
+                max_parallel, FANOUT_MAX_RETRIES, FANOUT_RAMP_DELAY_SECONDS)
+
     async with httpx.AsyncClient(timeout=FANOUT_TIMEOUT + 30) as client:
-        coros = [
-            _call_connector(client, headers, task)
-            for task in tasks
+        semaphore = asyncio.Semaphore(max_parallel)
+
+        async def _run_with_limits(idx: int, payload: dict) -> dict:
+            if FANOUT_RAMP_DELAY_SECONDS > 0:
+                # Stagger starts slightly so we do not spike ingress in one instant.
+                await asyncio.sleep((idx % max_parallel) * FANOUT_RAMP_DELAY_SECONDS)
+            async with semaphore:
+                return await _call_connector(
+                    client,
+                    headers,
+                    payload,
+                    max_retries=FANOUT_MAX_RETRIES,
+                )
+
+        task_objs = [
+            asyncio.ensure_future(_run_with_limits(i, task))
+            for i, task in enumerate(tasks)
         ]
-        task_objs = [asyncio.ensure_future(c) for c in coros]
 
         remaining = FANOUT_TIMEOUT - (time.monotonic() - t0)
         done, pending = await asyncio.wait(
@@ -956,9 +976,23 @@ async def _call_connector(
     with jittered exponential backoff.  By the time the retry fires,
     Cloud Run will have spun up more instances from the initial burst.
     """
-    import random
     connector_id = task["connector_id"]
-    _RETRYABLE_STATUSES = {429, 500, 502, 503}
+    _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+    max_retries = max(0, max_retries)
+
+    def _retry_delay_seconds(status_code: int, attempt: int, retry_after: str | None) -> float:
+        import random
+
+        if retry_after:
+            try:
+                return min(max(float(retry_after.strip()), 1.0), 20.0)
+            except ValueError:
+                pass
+
+        base = 2 ** (attempt + 1)
+        jitter = random.uniform(0, 2.0 if status_code == 429 else 1.0)
+        return min(base + jitter, 20.0)
+
     for attempt in range(max_retries + 1):
         try:
             resp = await client.post(
@@ -967,8 +1001,11 @@ async def _call_connector(
                 headers=headers,
             )
             if resp.status_code in _RETRYABLE_STATUSES and attempt < max_retries:
-                # Jittered backoff: 2-4s, 4-8s
-                delay = (2 ** (attempt + 1)) + random.uniform(0, 2)
+                delay = _retry_delay_seconds(
+                    resp.status_code,
+                    attempt,
+                    resp.headers.get("Retry-After"),
+                )
                 logger.debug("- %s: HTTP %s, retry %d after %.1fs",
                              connector_id, resp.status_code, attempt + 1, delay)
                 await asyncio.sleep(delay)
@@ -984,14 +1021,18 @@ async def _call_connector(
             return data
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in _RETRYABLE_STATUSES and attempt < max_retries:
-                delay = (2 ** (attempt + 1)) + random.uniform(0, 2)
+                delay = _retry_delay_seconds(
+                    exc.response.status_code,
+                    attempt,
+                    exc.response.headers.get("Retry-After"),
+                )
                 await asyncio.sleep(delay)
                 continue
             logger.warning("- %s: HTTP %s", connector_id, exc.response.status_code)
             return {"offers": [], "total_results": 0, "http_status": exc.response.status_code}
         except Exception as exc:
             if attempt < max_retries:
-                delay = (2 ** (attempt + 1)) + random.uniform(0, 2)
+                delay = _retry_delay_seconds(0, attempt, None)
                 await asyncio.sleep(delay)
                 continue
             logger.warning("- %s: %s", connector_id, exc)
