@@ -157,26 +157,26 @@ async def _run_test_search(
     adults: int, currency: str, limit: int, max_stops: int | None,
     cabin_class: str | None = None,
 ) -> dict:
-        """Run API + local search in parallel, merge results.
+    """Run API + local search in parallel, merge results.
 
-        For round-trip:
-            - API gets ONE call with return_from → native round-trip offers
-                (airlines price outbound+return together = much cheaper)
-            - Only non-RT-capable local connectors feed the combo engine as
-                separate outbound/return legs
-            - RT-capable connectors get their own dedicated round-trip fan-out
-            - Both streams are merged and sorted by price
-        """
-        import time as _time
-        from search_worker import (
-                RT_CAPABLE_CONNECTORS,
-                _deduplicate,
-                _filter_by_stops,
-                _filter_route_mismatch,
-                _get_valid_airports,
-                _search_api,
-                _search_local,
-        )
+    For round-trip:
+      - API gets ONE call with return_from → native round-trip offers
+        (airlines price outbound+return together = much cheaper)
+      - Only non-RT-capable local connectors feed the combo engine as
+        separate outbound/return legs
+      - RT-capable connectors get their own dedicated round-trip fan-out
+      - Both streams are merged and sorted by price
+    """
+    import time as _time
+    from search_worker import (
+        RT_CAPABLE_CONNECTORS,
+        _deduplicate,
+        _filter_by_stops,
+        _filter_route_mismatch,
+        _get_valid_airports,
+        _search_api,
+        _search_local,
+    )
 
     LETSFG_API_KEY = os.environ.get("LETSFG_API_KEY", "")
     t0 = _time.monotonic()
