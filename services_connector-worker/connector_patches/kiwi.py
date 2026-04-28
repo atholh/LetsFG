@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 import httpx
 
-from letsfg.models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -39,7 +39,7 @@ KIWI_LOCATIONS_URL = "https://api.skypicker.com/locations"
 _slug_cache: dict[str, str] = {}
 
 _HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
     "Content-Type": "application/json",
     "Accept": "application/json",
     "Accept-Language": "en-GB,en;q=0.9",
@@ -306,7 +306,7 @@ class KiwiConnectorClient:
             },
             "filter": {
                 "transportTypes": ["FLIGHT"],
-                "limit": min(req.limit or 200, 200),
+                "limit": min(req.limit or 100, 100),
                 "enableSelfTransfer": True,
                 "enableThrowAwayTicketing": True,
                 "enableTrueHiddenCity": True,
@@ -322,6 +322,23 @@ class KiwiConnectorClient:
         }
 
     async def search_flights(self, req: FlightSearchRequest) -> FlightSearchResponse:
+        ob_result = await self._search_ow(req)
+        if req.return_from and ob_result.total_results > 0:
+            # When return_from is set, _search_ow fires the RT GraphQL query
+            # (_RETURN_QUERY with inboundDepartureDate). The response already
+            # contains complete RT offers (total price + inbound leg populated).
+            # Combining again would double-count the return leg cost.
+            if any(o.inbound is not None for o in ob_result.offers):
+                return ob_result
+            ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
+            ib_result = await self._search_ow(ib_req)
+            if ib_result.total_results > 0:
+                ob_result.offers = self._combine_rt(ob_result.offers, ib_result.offers, req)
+                ob_result.total_results = len(ob_result.offers)
+        return ob_result
+
+
+    async def _search_ow(self, req: FlightSearchRequest) -> FlightSearchResponse:
         """Search flights via Kiwi.com's frontend GraphQL API."""
         client = await self._client()
         is_return = bool(req.return_from)
@@ -429,9 +446,12 @@ class KiwiConnectorClient:
         if not outbound:
             return None
 
-        # Collect airlines
-        all_segs = outbound.segments + (inbound.segments if inbound else [])
-        airlines = list({s.airline for s in all_segs if s.airline})
+        # Collect airlines — use outbound only for offer-level summary;
+        # inbound airlines would mislead when this offer is used as a one-way leg
+        airlines = sorted({s.airline for s in outbound.segments if s.airline})
+
+        # owner_airline = first outbound segment carrier (deterministic)
+        owner_airline = outbound.segments[0].airline if outbound.segments else (airlines[0] if airlines else "")
 
         # Travel hack info
         travel_hack = itin.get("travelHack", {}) or {}
@@ -495,7 +515,7 @@ class KiwiConnectorClient:
             outbound=outbound,
             inbound=inbound,
             airlines=airlines,
-            owner_airline=airlines[0] if airlines else "",
+            owner_airline=owner_airline,
             booking_url=booking_url,
             is_locked=False,
             conditions=conditions,
@@ -571,3 +591,24 @@ class KiwiConnectorClient:
             offers=[],
             total_results=0,
         )
+
+
+    @staticmethod
+    def _combine_rt(
+        ob: list[FlightOffer], ib: list[FlightOffer], req,
+    ) -> list[FlightOffer]:
+        combos: list[FlightOffer] = []
+        for o in ob[:15]:
+            for i in ib[:10]:
+                price = round(o.price + i.price, 2)
+                cid = hashlib.md5(f"{o.id}_{i.id}".encode()).hexdigest()[:12]
+                combos.append(FlightOffer(
+                    id=f"rt_kiwi_{cid}", price=price, currency=o.currency,
+                    outbound=o.outbound, inbound=i.outbound,
+                    airlines=list(dict.fromkeys(o.airlines + i.airlines)),
+                    owner_airline=o.owner_airline,
+                    booking_url=o.booking_url, is_locked=False,
+                    source=o.source, source_tier=o.source_tier,
+                ))
+        combos.sort(key=lambda c: c.price)
+        return combos[:20]

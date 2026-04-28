@@ -20,6 +20,7 @@ import time
 import uuid
 from datetime import datetime, date as date_type
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlparse
 
 from ..models.flights import (
     FlightOffer,
@@ -398,10 +399,10 @@ def _parse_radar(data: dict, req: FlightSearchRequest) -> list[FlightOffer]:
 
     for result in results:
         try:
-            price_obj = result.get("price", {})
-            raw_price = price_obj.get("raw")
-            if not raw_price or raw_price <= 0:
+            selected_price = _select_display_price(result)
+            if selected_price is None:
                 continue
+            raw_price, formatted = selected_price
 
             legs = result.get("legs", [])
             if not legs:
@@ -426,7 +427,7 @@ def _parse_radar(data: dict, req: FlightSearchRequest) -> list[FlightOffer]:
 
             itin_id = result.get("id", "")
             h = hashlib.md5(f"ss_{itin_id}_{raw_price}".encode()).hexdigest()[:10]
-            formatted = price_obj.get("formatted", f"{target_cur} {raw_price:.2f}")
+            formatted = formatted or f"{target_cur} {raw_price:.2f}"
 
             offers.append(FlightOffer(
                 id=f"ss_{h}",
@@ -449,6 +450,63 @@ def _parse_radar(data: dict, req: FlightSearchRequest) -> list[FlightOffer]:
             logger.warning("SKYSCANNER: parse itinerary failed: %s", e)
 
     return offers
+
+
+def _select_display_price(result: dict) -> tuple[float, str] | None:
+    price_obj = result.get("price", {})
+    preferred_option_id = price_obj.get("pricingOptionId")
+
+    safe_options: list[tuple[str, float]] = []
+    for option in result.get("pricingOptions", []) or []:
+        amount = _pricing_option_amount(option)
+        if amount is None:
+            continue
+        if _is_base_fare_pricing_option(option):
+            continue
+        safe_options.append((str(option.get("pricingOptionId") or ""), amount))
+
+    if safe_options:
+        if preferred_option_id:
+            for option_id, amount in safe_options:
+                if option_id == preferred_option_id:
+                    return amount, ""
+        return min(safe_options, key=lambda option: option[1])[1], ""
+
+    # Radar sometimes exposes only base-fare teaser prices. Those understate the final total,
+    # so skip the itinerary entirely instead of surfacing a fake cheaper fare.
+    if result.get("pricingOptions"):
+        return None
+
+    raw_price = price_obj.get("raw")
+    if not raw_price or raw_price <= 0:
+        return None
+    return float(raw_price), str(price_obj.get("formatted") or "")
+
+
+def _pricing_option_amount(option: dict) -> float | None:
+    price = option.get("price", {})
+    amount = price.get("amount")
+    if isinstance(amount, (int, float)) and amount > 0:
+        return float(amount)
+
+    for item in option.get("items", []) or []:
+        item_price = item.get("price", {})
+        item_amount = item_price.get("amount")
+        if isinstance(item_amount, (int, float)) and item_amount > 0:
+            return float(item_amount)
+
+    return None
+
+
+def _is_base_fare_pricing_option(option: dict) -> bool:
+    for item in option.get("items", []) or []:
+        url = item.get("url")
+        if not url:
+            continue
+        fare_type = parse_qs(urlparse(str(url)).query).get("fare_type", [""])[0]
+        if fare_type.lower() == "base_fare":
+            return True
+    return False
 
 
 def _build_route(leg: dict, req: FlightSearchRequest) -> FlightRoute | None:

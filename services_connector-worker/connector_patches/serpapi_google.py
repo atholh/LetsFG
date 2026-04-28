@@ -244,7 +244,7 @@ class SerpApiGoogleConnectorClient:
         ]
         if not prices:
             return None
-        price = max(prices)
+        price = round(sum(prices), 2)
 
         currency = None
         for result in (outbound_result, inbound_result):
@@ -254,8 +254,16 @@ class SerpApiGoogleConnectorClient:
         currency = currency or req.currency or "USD"
 
         all_segments = list(outbound.segments) + (list(inbound.segments) if inbound else [])
-        airlines = list(dict.fromkeys(segment.airline for segment in all_segments if segment.airline))
-        owner_airline = outbound.segments[0].airline if outbound.segments else (airlines[0] if airlines else "")
+        airlines = list(dict.fromkeys(
+            segment.airline_name or segment.airline
+            for segment in all_segments
+            if segment.airline_name or segment.airline
+        ))
+        owner_airline = (
+            (outbound.segments[0].airline_name or outbound.segments[0].airline)
+            if outbound.segments
+            else (airlines[0] if airlines else "")
+        )
 
         offer_key = "|".join(
             f"{segment.airline}:{segment.flight_no}:{segment.origin}:{segment.destination}:{segment.departure.isoformat()}"
@@ -285,13 +293,18 @@ class SerpApiGoogleConnectorClient:
 
         segments: list[FlightSegment] = []
         for leg in result.legs:
-            airline = getattr(leg.airline, "value", str(leg.airline or ""))
+            airline_code = getattr(leg.airline, "name", str(leg.airline or "")).lstrip("_")
+            airline_name = getattr(leg.airline, "value", str(leg.airline or ""))
             origin = getattr(leg.departure_airport, "name", str(leg.departure_airport or ""))
             destination = getattr(leg.arrival_airport, "name", str(leg.arrival_airport or ""))
+            flight_number = str(getattr(leg, "flight_number", "") or "")
+            if airline_code and flight_number and not flight_number.upper().startswith(airline_code.upper()):
+                flight_number = f"{airline_code}{flight_number}"
             segments.append(
                 FlightSegment(
-                    airline=airline,
-                    flight_no=str(getattr(leg, "flight_number", "") or ""),
+                    airline=airline_code or airline_name,
+                    airline_name=airline_name,
+                    flight_no=flight_number,
                     origin=origin,
                     destination=destination,
                     departure=getattr(leg, "departure_datetime", datetime(2000, 1, 1)),

@@ -11,7 +11,7 @@ if str(SDK_PYTHON_ROOT) not in sys.path:
 
 from letsfg.connectors.combo_engine import build_combos
 from letsfg.models.flights import FlightOffer, FlightRoute, FlightSegment
-from search_worker import RT_CAPABLE_CONNECTORS, _deduplicate
+from search_worker import RT_CAPABLE_CONNECTORS, _deduplicate, _prefer_wizzair_direct_offers
 
 
 def _make_round_trip_offer(return_flight_no: str) -> dict:
@@ -100,6 +100,94 @@ class DeduplicateOffersTest(unittest.TestCase):
         second["booking_url"] = "https://www.momondo.com/flight-search/WMI-BCN/2026-05-01"
 
         self.assertEqual(len(_deduplicate([first, second])), 1)
+
+    def test_prefers_repaired_wizzair_direct_offer_over_meta_duplicate(self) -> None:
+        direct = {
+            "source": "wizzair_direct",
+            "airlines": ["Wizz Air"],
+            "owner_airline": "Wizz Air",
+            "price": 74.28,
+            "currency": "EUR",
+            "booking_url": "https://wizzair.com/#/booking/select-flight/LTN/BCN/2026-05-03/BCN/LTN/2026-05-08/1/0/0/null",
+            "outbound": {
+                "segments": [
+                    {
+                        "airline": "W6",
+                        "airline_name": "Wizz Air",
+                        "flight_no": "",
+                        "origin": "LTN",
+                        "destination": "BCN",
+                        "departure": "2026-05-03T05:40:00",
+                        "arrival": "2026-05-03T05:40:00",
+                    }
+                ],
+                "total_duration_seconds": 0,
+                "stopovers": 0,
+            },
+            "inbound": {
+                "segments": [
+                    {
+                        "airline": "W6",
+                        "airline_name": "Wizz Air",
+                        "flight_no": "",
+                        "origin": "BCN",
+                        "destination": "LTN",
+                        "departure": "2026-05-08T09:35:00",
+                        "arrival": "2026-05-08T09:35:00",
+                    }
+                ],
+                "total_duration_seconds": 0,
+                "stopovers": 0,
+            },
+        }
+        meta = {
+            "source": "skyscanner_meta",
+            "airlines": ["Wizz Air UK"],
+            "owner_airline": "Wizz Air UK",
+            "price": 62.3,
+            "currency": "EUR",
+            "booking_url": "https://www.skyscanner.net/transport/flights/lon/bcn/260503/260508/",
+            "outbound": {
+                "segments": [
+                    {
+                        "airline": "W9",
+                        "airline_name": "Wizz Air UK",
+                        "flight_no": "W95701",
+                        "origin": "LTN",
+                        "destination": "BCN",
+                        "departure": "2026-05-03T05:40:00",
+                        "arrival": "2026-05-03T08:50:00",
+                    }
+                ],
+                "total_duration_seconds": 11400,
+                "stopovers": 0,
+            },
+            "inbound": {
+                "segments": [
+                    {
+                        "airline": "W9",
+                        "airline_name": "Wizz Air UK",
+                        "flight_no": "W95702",
+                        "origin": "BCN",
+                        "destination": "LTN",
+                        "departure": "2026-05-08T09:35:00",
+                        "arrival": "2026-05-08T10:50:00",
+                    }
+                ],
+                "total_duration_seconds": 4500,
+                "stopovers": 0,
+            },
+        }
+
+        repaired = _prefer_wizzair_direct_offers([direct, meta])
+
+        self.assertEqual(len(repaired), 1)
+        self.assertEqual(repaired[0]["source"], "wizzair_direct")
+        self.assertEqual(repaired[0]["booking_url"], direct["booking_url"])
+        self.assertEqual(repaired[0]["owner_airline"], "Wizz Air UK")
+        self.assertEqual(repaired[0]["outbound"]["segments"][0]["flight_no"], "W95701")
+        self.assertEqual(repaired[0]["outbound"]["total_duration_seconds"], 11400)
+        self.assertEqual(repaired[0]["inbound"]["segments"][0]["arrival"], "2026-05-08T10:50:00")
 
     def test_build_combos_respects_requested_max(self) -> None:
         outbound = [

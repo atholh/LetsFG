@@ -18,12 +18,12 @@ Environment variables:
 Deploy (Cloud Run — NO --function flag):
   gcloud run deploy connector-worker \
     --source=. --project=sms-caller --region=us-central1 \
-        --memory=2Gi --cpu=1 --concurrency=1 --max-instances=80 \\
+                                --memory=2Gi --cpu=1 --concurrency=1 --max-instances=200 \\
                 --timeout=120 --min-instances=0 --cpu-throttling --no-traffic
 
   Cost notes:
   - concurrency=1: each instance runs one browser connector at a time
-    - max-instances=80: better headroom for fan-out bursts without front-door throttling
+                - max-instances=200: bounded by current us-central1 project quota for this worker shape
         - min-instances=0: scales to zero when idle
   - cpu-throttling: CPU allocated only during request processing
         - increase min-instances only if cold-start buffering is worth the extra idle cost
@@ -39,6 +39,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 from flask import Flask, request, jsonify, abort
 
@@ -513,6 +514,7 @@ def _resolve_connector(connector_id: str):
         "serpapi_google": ("connector_patches.serpapi_google", "SerpApiGoogleConnectorClient", 45.0),
         "skyscanner_meta": ("connector_patches.skyscanner", "SkyscannerConnectorClient", 55.0),
         "tripcom_ota": ("connector_patches.tripcom", "TripcomConnectorClient", 70.0),
+        "wizzair_direct": ("connector_patches.wizzair_patch", "WizzairConnectorClient", 15.0),
         "indigo_direct": ("letsfg.connectors.indigo", "IndiGoConnectorClient", 170.0),
         # delta_direct: disabled — Kasada rejects SwiftShader/Xvfb fingerprint on Cloud Run.
         # Works locally (20 offers, 36.8s) but Cloud Run gets 429 on offer-api-prd.delta.com
@@ -537,7 +539,6 @@ def _resolve_connector(connector_id: str):
 
     # Fast connectors (not in _DIRECT_AIRLINE_connectorS)
     _fast = {
-        "wizzair_direct": ("letsfg.connectors.wizzair", "WizzairConnectorClient", 15.0),
         "kiwi_connector": ("letsfg.connectors.kiwi", "KiwiConnectorClient", 25.0),
         "discover_direct": ("letsfg.connectors.discover", "DiscoverConnectorClient", 20.0),
     }
@@ -1046,10 +1047,12 @@ _PROXY_ALWAYS: set[str] = {
     "flydubai_direct",       # Akamai/WAF blocks GCP IPs — works via residential
     "pegasus_direct",        # Akamai blocks from GCP IPs — needs residential proxy
     "chinasouthern_direct",  # GCP IPs geo-redirect to csair.com/us/en/ — needs EU residential proxy
+    "airchina_direct",       # Direct path repeatedly times out / empty-retries before proxy; go proxy-first
     "skyscanner_meta",       # PX blocks GCP IPs — needs residential proxy with sticky session
     "wego_meta",             # Direct path burns ~68s on Turnstile; proxy path now passes Cloudflare
     "travix_ota",            # Direct path burns ~56s before proxy retry; go proxy-first under 120s timeout
     "webjet_ota",            # Matrix URL serves security verification from GCP; go proxy-first
+    "smartwings_direct",     # Direct path hard-times out before the proxy retry; skip the wasted first hop
     # delta_direct: disabled (Kasada rejects SwiftShader/Xvfb fingerprint)
 }
 
@@ -1289,6 +1292,79 @@ def _looks_proxy_block(error_text: str) -> bool:
         "connection reset", "timeout", "timed out", "proxy", "challenge",
     )
     return any(t in s for t in tokens)
+
+
+_NO_PROXY_RETRY_AFTER_HARD_TIMEOUT: set[str] = {
+    # These connectors were observed spending a full direct budget and then
+    # burning a second long proxy attempt without adding offers.
+    "american_direct",
+    "edreams_ota",
+    "opodo_ota",
+    "tripcom_ota",
+    "turkish_direct",
+}
+
+
+def _should_retry_with_proxy(connector_id: str, last_error: str, retry_on_empty: bool) -> bool:
+    """Decide whether a second proxy attempt is worth the wall-clock cost."""
+    normalized_error = (last_error or "").strip().lower()
+    if normalized_error == "hard timeout" and connector_id in _NO_PROXY_RETRY_AFTER_HARD_TIMEOUT:
+        return False
+    return retry_on_empty or _looks_proxy_block(last_error)
+
+
+def _extract_offer_airline_fields(offer: Any) -> tuple[str | None, str | None]:
+    """Derive stable top-level airline fields for direct connector JSON responses."""
+    segments = []
+    outbound = getattr(offer, "outbound", None)
+    inbound = getattr(offer, "inbound", None)
+    if outbound and getattr(outbound, "segments", None):
+        segments.extend(outbound.segments)
+    if inbound and getattr(inbound, "segments", None):
+        segments.extend(inbound.segments)
+
+    first_airline_name = next(
+        (
+            (getattr(segment, "airline_name", "") or "").strip()
+            for segment in segments
+            if (getattr(segment, "airline_name", "") or "").strip()
+        ),
+        "",
+    )
+    first_airline_code = next(
+        (
+            (getattr(segment, "airline", "") or "").strip()
+            for segment in segments
+            if (getattr(segment, "airline", "") or "").strip()
+        ),
+        "",
+    )
+    airlines = [
+        str(airline).strip()
+        for airline in (getattr(offer, "airlines", None) or [])
+        if str(airline).strip()
+    ]
+    owner_airline = str(getattr(offer, "owner_airline", "") or "").strip()
+
+    airline = first_airline_name or (airlines[0] if airlines else "")
+    if not airline:
+        airline = owner_airline or first_airline_code or None
+
+    airline_code = first_airline_code or None
+    if not airline_code and owner_airline and len(owner_airline) <= 3:
+        airline_code = owner_airline
+
+    return airline, airline_code
+
+
+def _serialize_offer(offer: Any) -> dict[str, Any]:
+    payload = offer.model_dump(mode="json")
+    airline, airline_code = _extract_offer_airline_fields(offer)
+    if airline:
+        payload["airline"] = airline
+    if airline_code:
+        payload["airline_code"] = airline_code
+    return payload
 
 
 def _retry_on_empty_set() -> set[str]:
@@ -1571,7 +1647,7 @@ async def _execute(params: dict) -> dict:
             break
         if idx == 0 and len(attempt_plan) > 1:
             # Escalate to proxy only for likely blocked/error cases, or explicit override.
-            if retry_on_empty or _looks_proxy_block(last_error):
+            if _should_retry_with_proxy(connector_id, last_error, retry_on_empty):
                 # Kill any lingering Chrome on this connector's CDP port so
                 # the proxy retry can launch a fresh Chrome WITH proxy args.
                 cdp_port = _BROWSER_CDP_PORTS.get(connector_id)
@@ -1589,7 +1665,7 @@ async def _execute(params: dict) -> dict:
     logger.info("%s: %d total offers in %.1fs (proxy_mode=%s)",
                 connector_id, len(all_offers), elapsed, proxy_mode)
 
-    offers_json = [o.model_dump(mode="json") for o in all_offers]
+    offers_json = [_serialize_offer(o) for o in all_offers]
     response = {
         "connector_id": connector_id,
         "offers": offers_json,

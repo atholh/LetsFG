@@ -22,7 +22,7 @@ import time
 from datetime import datetime, date as date_type
 from typing import Any, Optional
 
-from letsfg.models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -73,6 +73,11 @@ class TripcomConnectorClient:
     ) -> FlightSearchResponse:
         ob_result = await self._search_ow(req)
         if req.return_from and ob_result.total_results > 0:
+            # When we navigate to the RT URL, _parse_ctrip already builds
+            # complete RT offers (total price + inbound leg). Combining again
+            # would double-count the return leg cost.
+            if any(o.inbound is not None for o in ob_result.offers):
+                return ob_result
             ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
             ib_result = await self._search_ow(ib_req)
             if ib_result.total_results > 0:
@@ -117,57 +122,40 @@ class TripcomConnectorClient:
         self, req: FlightSearchRequest
     ) -> list[FlightOffer] | None:
         from playwright.async_api import async_playwright
-        from .browser import get_proxy, auto_block_if_proxied, inject_stealth_js
+        from .browser import (
+            get_proxy, auto_block_if_proxied, inject_stealth_js,
+            stealth_args, stealth_position_arg,
+        )
 
         batch_data: list[dict] = []
         pull_data: list[dict] = []
-        middle_data: list[dict] = []
 
         async def on_response(response):
             url = response.url
-            if "batchSearch" not in url and "/pull/" not in url and "middle/search" not in url:
-                return
-            try:
-                if response.status != 200:
-                    return
-                body = await response.text()
-                if len(body) < 1000:
-                    return
-                data = json.loads(body)
-                payloads: list[dict] = []
-                if isinstance(data, dict):
-                    payloads.append(data)
-                    inner = data.get("data")
-                    if isinstance(inner, dict):
-                        payloads.append(inner)
-
-                for payload in payloads:
-                    itins = payload.get("flightItineraryList")
-                    if isinstance(itins, list) and itins:
-                        if "batchSearch" in url:
-                            batch_data.append(payload)
-                        else:
-                            pull_data.append(payload)
-                        return
-
-                    journeys = payload.get("journeyList")
-                    policies = payload.get("policyList")
-                    if isinstance(journeys, list) and journeys and isinstance(policies, list) and policies:
-                        middle_data.append(payload)
-                        return
-            except Exception:
-                return
+            if "batchSearch" in url or "/pull/" in url:
+                try:
+                    if response.status == 200:
+                        body = await response.text()
+                        if len(body) > 10000:
+                            data = json.loads(body)
+                            itins = (data.get("data") or {}).get("flightItineraryList")
+                            if itins:
+                                if "batchSearch" in url:
+                                    batch_data.append(data["data"])
+                                else:
+                                    pull_data.append(data["data"])
+                except Exception:
+                    pass
 
         pw = await async_playwright().start()
         try:
             proxy = get_proxy("TRIPCOM_PROXY")
             launch_kw: dict = {
-                "headless": False,
+                "headless": True,
                 "args": [
-                    "--window-position=-2400,-2400",
+                    *stealth_position_arg(),
                     "--window-size=1366,768",
                     "--disable-blink-features=AutomationControlled",
-                    "--disable-http2",
                 ],
             }
             if proxy:
@@ -190,11 +178,13 @@ class TripcomConnectorClient:
             dep_date = req.date_from.isoformat()
             trip_type = "oneway" if not req.return_from else "round"
             route = f"{req.origin.lower()}-{req.destination.lower()}"
+            _tc_cabin = {"M": "y_s", "W": "s_s", "C": "c", "F": "f"}
+            cabin = _tc_cabin.get(req.cabin_class, "y_s") if req.cabin_class else "y_s"
             url = (
                 f"https://flights.ctrip.com/online/list/"
                 f"{trip_type}-{route}"
                 f"?depdate={dep_date}"
-                f"&cabin=y_s"
+                f"&cabin={cabin}"
                 f"&adult={req.adults or 1}"
                 f"&child=0&infant=0"
             )
@@ -232,33 +222,16 @@ class TripcomConnectorClient:
             except Exception:
                 pass
 
-        if not batch_data and not middle_data:
-            logger.warning("TRIPCOM: no flight API response captured")
+        if not batch_data:
+            logger.warning("TRIPCOM: no batchSearch response captured")
             return None
 
-        # Merge batch + pull itineraries (legacy schema)
+        # Merge batch + pull itineraries
         all_itins = list(batch_data[0].get("flightItineraryList") or [])
         for pd in pull_data:
             all_itins.extend(pd.get("flightItineraryList") or [])
 
-        offers = _parse_ctrip(all_itins, req) if all_itins else []
-
-        # Fallback schema seen on newer Trip.com surfaces.
-        if middle_data:
-            offers.extend(_parse_ctrip_middle(middle_data[-1], req))
-
-        if not offers:
-            return []
-
-        deduped: list[FlightOffer] = []
-        seen: set[str] = set()
-        for offer in offers:
-            if offer.id in seen:
-                continue
-            seen.add(offer.id)
-            deduped.append(offer)
-
-        return deduped
+        return _parse_ctrip(all_itins, req)
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
         return FlightSearchResponse(
@@ -410,115 +383,5 @@ def _parse_ctrip(
             ))
         except Exception as e:
             logger.warning("TRIPCOM: parse itinerary failed: %s", e)
-
-    return offers
-
-
-def _parse_ctrip_middle(
-    payload: dict, req: FlightSearchRequest,
-) -> list[FlightOffer]:
-    """Parse newer Trip.com middle/search payloads (journeyList + policyList)."""
-    basic = payload.get("basicInfo") or {}
-    source_cur = (basic.get("currency") or req.currency or "EUR").upper()
-    target_cur = (req.currency or source_cur).upper()
-
-    route_by_journey: dict[int, FlightRoute] = {}
-    for j in payload.get("journeyList") or []:
-        try:
-            journey_no = int(j.get("journeyNo") or 0)
-        except Exception:
-            continue
-        if journey_no <= 0:
-            continue
-
-        segments: list[FlightSegment] = []
-        for t in j.get("transportList") or []:
-            flight = t.get("flight") or {}
-            airline_info = flight.get("airlineInfo") or {}
-            dep = t.get("departPoint") or {}
-            arr = t.get("arrivePoint") or {}
-            dep_ap = dep.get("airPort") or {}
-            arr_ap = arr.get("airPort") or {}
-            dep_date = t.get("dateInfo") or {}
-
-            code = airline_info.get("code") or ""
-            name = airline_info.get("name") or code
-            origin = dep_ap.get("airportCode") or req.origin
-            destination = arr_ap.get("airportCode") or req.destination
-
-            segments.append(FlightSegment(
-                airline=code,
-                airline_name=name,
-                flight_no=flight.get("flightNo") or "",
-                origin=origin,
-                destination=destination,
-                departure=_parse_dt(dep_date.get("departDate")),
-                arrival=_parse_dt(dep_date.get("arriveDate")),
-            ))
-
-        if not segments:
-            continue
-
-        duration_min = int(j.get("duration") or 0)
-        route_by_journey[journey_no] = FlightRoute(
-            segments=segments,
-            total_duration_seconds=max(0, duration_min) * 60,
-            stopovers=max(0, len(segments) - 1),
-        )
-
-    offers: list[FlightOffer] = []
-    for pol in payload.get("policyList") or []:
-        try:
-            grade_info = pol.get("gradeInfoList") or []
-            journey_no = 1
-            if grade_info:
-                journey_no = int((grade_info[0] or {}).get("journeyNo") or 1)
-
-            route = route_by_journey.get(journey_no)
-            if route is None:
-                continue
-
-            p = pol.get("price") or {}
-            raw_price = float(
-                p.get("discountAveragePrice")
-                or p.get("averagePrice")
-                or p.get("totalPrice")
-                or 0
-            )
-            if raw_price <= 0:
-                continue
-
-            if source_cur == "CNY" and target_cur != "CNY":
-                price = _cny_to(raw_price, target_cur)
-                out_cur = target_cur
-            else:
-                price = round(raw_price, 2)
-                out_cur = target_cur if target_cur else source_cur
-
-            airlines = list(dict.fromkeys(
-                s.airline_name or s.airline for s in route.segments if (s.airline_name or s.airline)
-            ))
-            pid = pol.get("policyId") or ""
-            h = hashlib.md5(f"tm_{pid}_{price}".encode()).hexdigest()[:10]
-
-            offers.append(FlightOffer(
-                id=f"tm_{h}",
-                price=price,
-                currency=out_cur,
-                price_formatted=f"{out_cur} {price:.2f}",
-                outbound=route,
-                inbound=None,
-                airlines=airlines,
-                owner_airline=airlines[0] if airlines else "",
-                source="tripcom_ota",
-                source_tier="free",
-                is_locked=False,
-                booking_url=(
-                    f"https://www.trip.com/flights/list?dcity={req.origin.lower()}"
-                    f"&acity={req.destination.lower()}&ddate={req.date_from.isoformat()}"
-                ),
-            ))
-        except Exception:
-            continue
 
     return offers

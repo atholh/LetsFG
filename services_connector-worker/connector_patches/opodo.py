@@ -18,7 +18,7 @@ import time
 from datetime import datetime, date as date_type
 from typing import Any, Optional
 
-from letsfg.models.flights import (
+from ..models.flights import (
     FlightOffer,
     FlightRoute,
     FlightSearchRequest,
@@ -55,6 +55,11 @@ class OpodoConnectorClient:
     ) -> FlightSearchResponse:
         ob_result = await self._search_ow(req)
         if req.return_from and ob_result.total_results > 0:
+            # When we navigate to the RT URL, _parse_graphql already builds
+            # complete RT offers (total price + inbound leg). Combining again
+            # would double-count the return leg cost.
+            if any(o.inbound is not None for o in ob_result.offers):
+                return ob_result
             ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
             ib_result = await self._search_ow(ib_req)
             if ib_result.total_results > 0:
@@ -98,34 +103,39 @@ class OpodoConnectorClient:
     async def _do_search(
         self, req: FlightSearchRequest
     ) -> list[FlightOffer] | None:
-        from .browser import inject_stealth_js, auto_block_if_proxied
-        from .edreams import _get_browser as _get_edreams_browser, _reset_chrome_profile
+        from playwright.async_api import async_playwright
 
         graphql_data: list[dict] = []
-        blocked = False
 
         async def on_response(response):
-            nonlocal blocked
             if "graphql" not in response.url:
                 return
             try:
-                if response.status == 403:
-                    blocked = True
-                    return
-                if response.status != 200:
-                    return
-                body = await response.text()
-                if len(body) < 3000:
-                    return
-                data = json.loads(body)
-                si = data.get("data", {}).get("searchItinerary")
-                if si and si.get("itineraries"):
-                    graphql_data.append(si)
+                if response.status == 200:
+                    body = await response.text()
+                    if len(body) > 50000:
+                        data = json.loads(body)
+                        si = data.get("data", {}).get("searchItinerary")
+                        if si and si.get("itineraries"):
+                            graphql_data.append(si)
             except Exception:
                 pass
 
+        pw = await async_playwright().start()
         try:
-            browser = await _get_edreams_browser()
+            from .browser import get_proxy
+            proxy = get_proxy("OPODO_PROXY") or get_proxy("ODIGEO_PROXY")
+            launch_kw: dict = {
+                "headless": False,
+                "args": [
+                    "--window-position=-2400,-2400",
+                    "--window-size=1366,768",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            }
+            if proxy:
+                launch_kw["proxy"] = proxy
+            browser = await pw.chromium.launch(**launch_kw)
             ctx = await browser.new_context(
                 viewport={"width": 1366, "height": 768},
                 user_agent=(
@@ -135,12 +145,15 @@ class OpodoConnectorClient:
                 ),
             )
             page = await ctx.new_page()
-            await inject_stealth_js(page)
-            await auto_block_if_proxied(page)
+            if proxy:
+                from .browser import auto_block_if_proxied
+                await auto_block_if_proxied(page)
             page.on("response", on_response)
 
             dep_date = req.date_from.isoformat()
             trip_type = "R" if req.return_from else "O"
+            _op_cabin = {"M": "E", "W": "W", "C": "B", "F": "F"}
+            cabin = _op_cabin.get(req.cabin_class, "E") if req.cabin_class else "E"
             url = (
                 f"https://www.opodo.co.uk/travel/"
                 f"#results/type={trip_type}"
@@ -148,13 +161,13 @@ class OpodoConnectorClient:
                 f";from={req.origin}"
                 f";to={req.destination}"
                 f";pa={req.adults or 1}"
-                f";py=E"
+                f";py={cabin}"
             )
             if req.return_from:
                 url += f";ret={req.return_from.isoformat()}"
 
-            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(2000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(3000)
 
             # Dismiss cookie consent
             for sel in [
@@ -171,21 +184,22 @@ class OpodoConnectorClient:
                 except Exception:
                     pass
 
-            for _ in range(7):
+            for _ in range(6):
                 await page.wait_for_timeout(5000)
-                if graphql_data or blocked:
+                if graphql_data:
                     break
 
             await page.close()
             await ctx.close()
+            await browser.close()
         except Exception as e:
             logger.error("OPODO browser error: %s", e)
             return None
-
-        if blocked:
-            logger.warning("OPODO: bot protection blocked, resetting profile")
-            await _reset_chrome_profile()
-            return None
+        finally:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
 
         if not graphql_data:
             logger.warning("OPODO: no GraphQL searchItinerary captured")

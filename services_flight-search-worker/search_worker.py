@@ -10,8 +10,9 @@ Phase 2 (~60-120s): Fan-out to connector-worker instances
   - Each call runs ONE airline connector on its OWN Cloud Run instance
   - 174 connectors registered, route-filtered to ~15-40 per search
   - Cloud Run auto-scales: 25 parallel requests = 25 separate instances
-  - No Chrome/Playwright needed here — the connector-worker handles that
-  - Waits up to 3 minutes (FANOUT_TIMEOUT=180s) for all connectors
+    - No Chrome/Playwright needed here — the connector-worker handles that
+        - No overall fan-out deadline by default; individual connector and Cloud Run
+            timeouts still apply. Set FANOUT_TIMEOUT to cap the whole search when needed.
 
 Round-trip searches fire outbound + return directions in parallel,
 then combine one-way legs via the combo engine for virtual interlining
@@ -21,6 +22,7 @@ Each phase calls back to the workflow engine as soon as results are ready.
 """
 
 import asyncio
+import copy
 import hashlib
 import logging
 import os
@@ -77,9 +79,14 @@ CALLBACK_SECRET = os.environ.get("CALLBACK_SECRET", "")
 CONNECTOR_WORKER_URL = os.environ.get("CONNECTOR_WORKER_URL", "")
 CONNECTOR_WORKER_SECRET = os.environ.get("CONNECTOR_WORKER_SECRET", "")
 MAX_FANOUT_TIMEOUT = 180.0
-FANOUT_TIMEOUT = min(float(os.environ.get("FANOUT_TIMEOUT", "180")), MAX_FANOUT_TIMEOUT)
+FANOUT_TIMEOUT = (
+    min(float(os.environ.get("FANOUT_TIMEOUT", "0")), MAX_FANOUT_TIMEOUT)
+    if float(os.environ.get("FANOUT_TIMEOUT", "0")) > 0
+    else 0.0
+)
+FANOUT_REQUEST_TIMEOUT = max(float(os.environ.get("FANOUT_REQUEST_TIMEOUT", "240")), 30.0)
 FANOUT_MAX_PARALLEL = max(1, int(os.environ.get("FANOUT_MAX_PARALLEL", "20")))
-FANOUT_MAX_RETRIES = max(0, int(os.environ.get("FANOUT_MAX_RETRIES", "3")))
+FANOUT_MAX_RETRIES = max(0, int(os.environ.get("FANOUT_MAX_RETRIES", "1")))
 FANOUT_RAMP_DELAY_SECONDS = max(0.0, float(os.environ.get("FANOUT_RAMP_DELAY_SECONDS", "0.05")))
 FANOUT_PER_CONNECTOR_LIMIT = max(1, int(os.environ.get("FANOUT_PER_CONNECTOR_LIMIT", "100")))
 
@@ -435,7 +442,8 @@ async def run_search(params: dict) -> dict:
         logger.error("Phase 2 failed: %s", exc)
 
     # ── Merge, deduplicate, sort ────────────────────────────────────────
-    merged = _deduplicate(all_offers)
+    merged = _prefer_wizzair_direct_offers(all_offers)
+    merged = _deduplicate(merged)
     valid_origins, valid_dests = _get_valid_airports(origin, destination)
     merged = _filter_route_mismatch(merged, valid_origins, valid_dests)
     if max_stops is not None:
@@ -608,7 +616,8 @@ async def _run_round_trip(
     # Round-trip searches should only surface complete itineraries.
     # One-way legs are inputs to the combo engine, not final user-facing offers.
     all_offers = api_offers + rt_aggregator_offers + combos_json
-    merged = _deduplicate(all_offers)
+    merged = _prefer_wizzair_direct_offers(all_offers)
+    merged = _deduplicate(merged)
     # Final route validation on all merged offers (catches any stray results from API/aggregators)
     merged = _filter_route_mismatch(merged, valid_origins, valid_dests)
     if max_stops is not None:
@@ -845,20 +854,27 @@ async def _search_local(
                     disabled_skipped)
 
     # ── Build fan-out tasks ─────────────────────────────────────────────
-    tasks: list[dict] = []
+    fast_tasks: list[dict] = []
+    primary_direct_tasks: list[dict] = []
     origin_country = get_country(origin)
     dest_country = get_country(destination)
 
-    def _base_payload(connector_id: str, all_pairs: bool) -> dict:
+    def _base_payload(
+        connector_id: str,
+        all_pairs: bool,
+        task_origin: str = origin,
+        task_destination: str = destination,
+        task_sibling_pairs: list[list[str]] | None = None,
+    ) -> dict:
         payload = {
             "connector_id": connector_id,
-            "origin": origin,
-            "destination": destination,
+            "origin": task_origin,
+            "destination": task_destination,
             "date_from": date_from,
             "adults": adults,
             "currency": currency,
             "limit": min(limit, FANOUT_PER_CONNECTOR_LIMIT),
-            "sibling_pairs": sibling_pairs,
+            "sibling_pairs": sibling_pairs if task_sibling_pairs is None else task_sibling_pairs,
             "all_pairs": all_pairs,
         }
         if children:
@@ -880,21 +896,31 @@ async def _search_local(
             if countries and origin_country and dest_country:
                 if origin_country not in countries and dest_country not in countries:
                     continue
-        tasks.append(_base_payload(fast_id, all_pairs=True))
+        fast_tasks.append(_base_payload(fast_id, all_pairs=True))
 
-    # Direct airline connectors (route-filtered) — primary + siblings
+    # Direct airline connectors (route-filtered) — fire the primary route first.
+    # If a connector returns offers, sibling airport pairs are launched in a
+    # second wave so they run in parallel instead of serializing in connector-worker.
     for name, _cls, timeout in filtered:
         if name in excluded:
             continue
         if only_rt_capable and name not in RT_CAPABLE_CONNECTORS:
             continue
-        tasks.append(_base_payload(name, all_pairs=False))
+        primary_direct_tasks.append(
+            _base_payload(
+                name,
+                all_pairs=False,
+                task_sibling_pairs=[],
+            )
+        )
 
-    logger.info("Fan-out: %s->%s — %d tasks (%d direct + %d fast)",
-                origin, destination, len(tasks),
-                len(filtered), len(tasks) - len(filtered))
+    initial_tasks = fast_tasks + primary_direct_tasks
 
-    if not tasks:
+    logger.info("Fan-out: %s->%s — %d initial tasks (%d direct primaries + %d fast)",
+                origin, destination, len(initial_tasks),
+                len(primary_direct_tasks), len(fast_tasks))
+
+    if not initial_tasks:
         return {"offers": [], "total_results": 0}
 
     # ── Fire all tasks in parallel ──────────────────────────────────────
@@ -903,11 +929,11 @@ async def _search_local(
     if CONNECTOR_WORKER_SECRET:
         headers["Authorization"] = f"Bearer {CONNECTOR_WORKER_SECRET}"
 
-    max_parallel = max(1, min(FANOUT_MAX_PARALLEL, len(tasks)))
+    max_parallel = max(1, FANOUT_MAX_PARALLEL)
     logger.info("Fan-out throttle: max_parallel=%d retries=%d ramp_delay=%.2fs",
                 max_parallel, FANOUT_MAX_RETRIES, FANOUT_RAMP_DELAY_SECONDS)
 
-    async with httpx.AsyncClient(timeout=FANOUT_TIMEOUT + 30) as client:
+    async with httpx.AsyncClient(timeout=FANOUT_REQUEST_TIMEOUT) as client:
         semaphore = asyncio.Semaphore(max_parallel)
 
         async def _run_with_limits(idx: int, payload: dict) -> dict:
@@ -922,75 +948,152 @@ async def _search_local(
                     max_retries=FANOUT_MAX_RETRIES,
                 )
 
-        task_objs = [
-            asyncio.ensure_future(_run_with_limits(i, task))
-            for i, task in enumerate(tasks)
-        ]
+        async def _run_task_batch(batch_name: str, batch_tasks: list[dict], index_offset: int) -> list:
+            if not batch_tasks:
+                return []
 
-        remaining = FANOUT_TIMEOUT - (time.monotonic() - t0)
-        done, pending = await asyncio.wait(
-            task_objs, timeout=max(remaining, 10.0),
+            task_objs = [
+                asyncio.ensure_future(_run_with_limits(index_offset + i, task))
+                for i, task in enumerate(batch_tasks)
+            ]
+
+            if FANOUT_TIMEOUT > 0:
+                remaining = FANOUT_TIMEOUT - (time.monotonic() - t0)
+                if remaining <= 0:
+                    logger.info("%s: deadline reached before launching %d tasks", batch_name, len(batch_tasks))
+                    for task_obj in task_objs:
+                        task_obj.cancel()
+                    await asyncio.gather(*task_objs, return_exceptions=True)
+                    return task_objs
+
+                done, pending = await asyncio.wait(
+                    task_objs, timeout=max(remaining, 10.0),
+                )
+
+                if pending:
+                    logger.info("%s deadline: %d/%d done, cancelling %d pending",
+                                batch_name, len(done), len(task_objs), len(pending))
+                    for pending_task in pending:
+                        pending_task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+            else:
+                logger.info("%s: waiting for all %d tasks", batch_name, len(task_objs))
+                await asyncio.gather(*task_objs, return_exceptions=True)
+
+            return task_objs
+
+        def _collect_batch_results(batch_tasks: list[dict], task_objs: list) -> tuple[list[dict], list[dict], set[str]]:
+            batch_offers: list[dict] = []
+            batch_results: list[dict] = []
+            successful_connectors: set[str] = set()
+
+            for i, task_obj in enumerate(task_objs):
+                connector_id = batch_tasks[i]["connector_id"]
+                try:
+                    result = task_obj.result()
+                    offers = result.get("offers", [])
+                    batch_offers.extend(offers)
+                    if offers:
+                        successful_connectors.add(connector_id)
+                    batch_results.append({
+                        "connector": connector_id,
+                        "ok": len(offers) > 0 or result.get("ok", len(offers) > 0),
+                        "offers": len(offers),
+                        "latency_ms": int(result.get("elapsed_seconds", 0) * 1000),
+                        "error_type": result.get("error_type"),
+                        "error_message": result.get("error_message"),
+                        "error_category": result.get("error_category"),
+                        "http_status": result.get("http_status"),
+                    })
+                except (asyncio.CancelledError, asyncio.InvalidStateError):
+                    logger.debug("Task %s cancelled/pending", connector_id)
+                    batch_results.append({
+                        "connector": connector_id,
+                        "ok": False,
+                        "offers": 0,
+                        "latency_ms": int((time.monotonic() - t0) * 1000),
+                        "error_type": "CancelledError",
+                        "error_message": "Fan-out timeout — connector did not finish in time",
+                        "error_category": "cancelled",
+                        "http_status": None,
+                    })
+                except Exception as exc:
+                    logger.warning("Task %s failed: %s", connector_id, exc)
+                    batch_results.append({
+                        "connector": connector_id,
+                        "ok": False,
+                        "offers": 0,
+                        "latency_ms": int((time.monotonic() - t0) * 1000),
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc)[:200],
+                        "error_category": "crash",
+                        "http_status": None,
+                    })
+
+            return batch_offers, batch_results, successful_connectors
+
+        initial_task_objs = await _run_task_batch("Fan-out phase 1", initial_tasks, 0)
+        all_offers, connector_results, successful_direct_connectors = _collect_batch_results(
+            initial_tasks,
+            initial_task_objs,
         )
+        successful_direct_connectors &= {task["connector_id"] for task in primary_direct_tasks}
 
-        if pending:
-            logger.info("Fan-out deadline: %d/%d done, cancelling %d pending",
-                        len(done), len(task_objs), len(pending))
-            for t in pending:
-                t.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+        sibling_tasks: list[dict] = []
+        if sibling_pairs and successful_direct_connectors:
+            for connector_id in sorted(successful_direct_connectors):
+                for sibling_origin, sibling_destination in sibling_pairs:
+                    sibling_tasks.append(
+                        _base_payload(
+                            connector_id,
+                            all_pairs=False,
+                            task_origin=sibling_origin,
+                            task_destination=sibling_destination,
+                            task_sibling_pairs=[],
+                        )
+                    )
+            logger.info(
+                "Sibling fan-out: %s->%s — %d tasks across %d successful direct connectors",
+                origin,
+                destination,
+                len(sibling_tasks),
+                len(successful_direct_connectors),
+            )
 
-    # ── Collect offers + telemetry ─────────────────────────────────────
-    all_offers: list[dict] = []
-    connector_results: list[dict] = []
-    for i, task_obj in enumerate(task_objs):
-        connector_id = tasks[i]["connector_id"]
-        try:
-            result = task_obj.result()
-            offers = result.get("offers", [])
-            all_offers.extend(offers)
-            # Telemetry from connector-worker response
-            connector_results.append({
-                "connector": connector_id,
-                "ok": len(offers) > 0 or result.get("ok", len(offers) > 0),
-                "offers": len(offers),
-                "latency_ms": int(result.get("elapsed_seconds", 0) * 1000),
-                "error_type": result.get("error_type"),
-                "error_message": result.get("error_message"),
-                "error_category": result.get("error_category"),
-                "http_status": result.get("http_status"),
-            })
-        except (asyncio.CancelledError, asyncio.InvalidStateError):
-            logger.debug("Task %s cancelled/pending", connector_id)
-            connector_results.append({
-                "connector": connector_id,
-                "ok": False,
-                "offers": 0,
-                "latency_ms": int((time.monotonic() - t0) * 1000),
-                "error_type": "CancelledError",
-                "error_message": "Fan-out timeout — connector did not finish in time",
-                "error_category": "cancelled",
-                "http_status": None,
-            })
-        except Exception as exc:
-            logger.warning("Task %s failed: %s", connector_id, exc)
-            connector_results.append({
-                "connector": connector_id,
-                "ok": False,
-                "offers": 0,
-                "latency_ms": int((time.monotonic() - t0) * 1000),
-                "error_type": type(exc).__name__,
-                "error_message": str(exc)[:200],
-                "error_category": "crash",
-                "http_status": None,
-            })
+        sibling_task_objs = await _run_task_batch("Fan-out phase 2", sibling_tasks, len(initial_tasks))
+        sibling_offers, sibling_results, _ = _collect_batch_results(sibling_tasks, sibling_task_objs)
+        all_offers.extend(sibling_offers)
+        connector_results.extend(sibling_results)
+
+    aggregated_connector_results: dict[str, dict] = {}
+    for result in connector_results:
+        connector_id = result["connector"]
+        aggregate = aggregated_connector_results.get(connector_id)
+        if not aggregate:
+            aggregated_connector_results[connector_id] = dict(result)
+            continue
+
+        aggregate["ok"] = aggregate["ok"] or result["ok"]
+        aggregate["offers"] += result["offers"]
+        aggregate["latency_ms"] = max(aggregate["latency_ms"], result["latency_ms"])
+        aggregate["http_status"] = aggregate.get("http_status") or result.get("http_status")
+        if not aggregate["ok"]:
+            aggregate["error_type"] = aggregate.get("error_type") or result.get("error_type")
+            aggregate["error_message"] = aggregate.get("error_message") or result.get("error_message")
+            aggregate["error_category"] = aggregate.get("error_category") or result.get("error_category")
+        else:
+            aggregate["error_type"] = None
+            aggregate["error_message"] = None
+            aggregate["error_category"] = None
 
     elapsed = time.monotonic() - t0
-    logger.info("Fan-out complete: %s->%s — %d offers from %d connectors in %.1fs",
-                origin, destination, len(all_offers), len(tasks), elapsed)
+    total_task_count = len(initial_tasks) + len(sibling_tasks)
+    logger.info("Fan-out complete: %s->%s — %d offers from %d task results in %.1fs",
+                origin, destination, len(all_offers), total_task_count, elapsed)
 
     # ── Report telemetry to health system ───────────────────────────────
     asyncio.ensure_future(_report_telemetry(
-        connector_results, f"{origin}-{destination}",
+        list(aggregated_connector_results.values()), f"{origin}-{destination}",
     ))
 
     return {
@@ -1002,13 +1105,16 @@ async def _search_local(
 
 async def _call_connector(
     client: httpx.AsyncClient, headers: dict, task: dict,
-    max_retries: int = 2,
+    max_retries: int = 1,
 ) -> dict:
     """Make a single HTTP call to the connector-worker service.
 
-    Retries on HTTP 429 (rate limited) and 500 (Cloud Run cold-start)
-    with jittered exponential backoff.  By the time the retry fires,
-    Cloud Run will have spun up more instances from the initial burst.
+    max_retries counts retries after the initial attempt, so the default of 1
+    means each connector gets at most two total calls.
+
+    Retries on transient upstream failures (429/5xx) with jittered exponential
+    backoff. By the time the retry fires, Cloud Run will often have spun up
+    more instances from the initial burst.
     """
     connector_id = task["connector_id"]
     _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
@@ -1265,6 +1371,158 @@ def _route_signature(route: dict | None) -> str:
             str(segment.get("arrival") or ""),
         ]))
     return "||".join(parts)
+
+
+def _segment_flight_number(segment: dict) -> str:
+    return str(segment.get("flight_no") or segment.get("flight_number") or "").strip()
+
+
+def _segment_departure(segment: dict) -> str:
+    return str(segment.get("departure") or segment.get("departure_time") or "").strip()
+
+
+def _segment_arrival(segment: dict) -> str:
+    return str(segment.get("arrival") or segment.get("arrival_time") or "").strip()
+
+
+def _route_equivalence_signature(route: dict | None) -> str | None:
+    segments = (route or {}).get("segments") or []
+    if not segments:
+        return None
+
+    first = segments[0]
+    last = segments[-1]
+    origin = str(first.get("origin") or "").upper()
+    destination = str(last.get("destination") or "").upper()
+    departure = _segment_departure(first)
+    if not origin or not destination or not departure:
+        return None
+    return f"{origin}>{destination}@{departure}"
+
+
+def _offer_equivalence_signature(offer: dict) -> str | None:
+    outbound_sig = _route_equivalence_signature(offer.get("outbound"))
+    if not outbound_sig:
+        return None
+    inbound = offer.get("inbound")
+    inbound_sig = _route_equivalence_signature(inbound) if inbound else ""
+    return f"{outbound_sig}|{inbound_sig}"
+
+
+def _route_has_sane_schedule(route: dict | None) -> bool:
+    segments = (route or {}).get("segments") or []
+    if not segments:
+        return False
+
+    first = segments[0]
+    last = segments[-1]
+    departure = _segment_departure(first)
+    arrival = _segment_arrival(last)
+    duration = int((route or {}).get("total_duration_seconds") or 0)
+    if departure and arrival and departure != arrival:
+        return True
+    return duration > 0
+
+
+def _offer_has_sane_schedule(offer: dict) -> bool:
+    if not _route_has_sane_schedule(offer.get("outbound")):
+        return False
+    inbound = offer.get("inbound")
+    return inbound is None or _route_has_sane_schedule(inbound)
+
+
+def _offer_mentions_wizzair(offer: dict) -> bool:
+    source = str(offer.get("source") or "").strip().lower()
+    if source == "wizzair_direct":
+        return True
+
+    labels = [
+        *[str(item) for item in (offer.get("airlines") or [])],
+        str(offer.get("owner_airline") or ""),
+    ]
+    for label in labels:
+        if "WIZZ" in label.upper():
+            return True
+
+    for route_key in ("outbound", "inbound"):
+        segments = (offer.get(route_key) or {}).get("segments") or []
+        for segment in segments:
+            airline_code = str(segment.get("airline") or "").strip().upper()
+            flight_number = _segment_flight_number(segment).upper()
+            airline_name = str(segment.get("airline_name") or "").upper()
+            if airline_code in {"W6", "W9"}:
+                return True
+            if flight_number.startswith("W6") or flight_number.startswith("W9"):
+                return True
+            if "WIZZ" in airline_name:
+                return True
+
+    return False
+
+
+def _hydrate_offer_schedule_from_match(direct_offer: dict, matched_offer: dict) -> dict:
+    repaired = copy.deepcopy(direct_offer)
+    repaired["outbound"] = copy.deepcopy(matched_offer.get("outbound") or repaired.get("outbound"))
+    if matched_offer.get("inbound") is not None:
+        repaired["inbound"] = copy.deepcopy(matched_offer.get("inbound"))
+    if matched_offer.get("airlines"):
+        repaired["airlines"] = copy.deepcopy(matched_offer.get("airlines"))
+    if matched_offer.get("owner_airline"):
+        repaired["owner_airline"] = matched_offer.get("owner_airline")
+    return repaired
+
+
+def _prefer_wizzair_direct_offers(offers: list[dict]) -> list[dict]:
+    """Prefer Wizz direct offers over equivalent OTA/meta copies when possible.
+
+    The current Wizz direct connector returns public pricing but incomplete timing
+    metadata from timetableV2. When an equivalent OTA/meta offer exists for the
+    same leg timings, copy the sane route details onto the direct offer and drop
+    the duplicate intermediary listing.
+    """
+    candidates_by_signature: dict[str, dict] = {}
+    for offer in offers:
+        signature = _offer_equivalence_signature(offer)
+        if not signature or not _offer_mentions_wizzair(offer):
+            continue
+        if str(offer.get("source") or "") == "wizzair_direct":
+            continue
+        if not _offer_has_sane_schedule(offer):
+            continue
+        candidates_by_signature.setdefault(signature, offer)
+
+    repaired_by_index: dict[int, dict] = {}
+    preferred_signatures: set[str] = set()
+    for index, offer in enumerate(offers):
+        if str(offer.get("source") or "") != "wizzair_direct":
+            continue
+        signature = _offer_equivalence_signature(offer)
+        if not signature:
+            continue
+
+        repaired_offer = offer
+        match = candidates_by_signature.get(signature)
+        if match is not None and not _offer_has_sane_schedule(offer):
+            repaired_offer = _hydrate_offer_schedule_from_match(offer, match)
+            repaired_by_index[index] = repaired_offer
+
+        if _offer_has_sane_schedule(repaired_offer):
+            preferred_signatures.add(signature)
+
+    preferred: list[dict] = []
+    for index, offer in enumerate(offers):
+        current_offer = repaired_by_index.get(index, offer)
+        signature = _offer_equivalence_signature(current_offer)
+        if (
+            signature
+            and signature in preferred_signatures
+            and str(current_offer.get("source") or "") != "wizzair_direct"
+            and _offer_mentions_wizzair(current_offer)
+        ):
+            continue
+        preferred.append(current_offer)
+
+    return preferred
 
 
 def _deduplicate(offers: list[dict]) -> list[dict]:

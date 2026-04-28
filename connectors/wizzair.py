@@ -357,7 +357,7 @@ class WizzairConnectorClient:
                         inbound=rt["route"],
                         airlines=["Wizz Air"],
                         owner_airline="W6",
-                        booking_url=self._build_booking_url(req),
+                        booking_url=self._build_booking_url(ob["route"], req.adults, req.children, req.infants, rt["route"]),
                         is_locked=False,
                         source="wizzair_api",
                         source_tier="free",
@@ -374,7 +374,7 @@ class WizzairConnectorClient:
                     inbound=None,
                     airlines=["Wizz Air"],
                     owner_airline="W6",
-                    booking_url=self._build_booking_url(req),
+                    booking_url=self._build_booking_url(ob["route"], req.adults, req.children, req.infants),
                     is_locked=False,
                     source="wizzair_api",
                     source_tier="free",
@@ -395,13 +395,28 @@ class WizzairConnectorClient:
             except Exception:
                 return datetime(2000, 1, 1)
 
-    def _build_booking_url(self, req: FlightSearchRequest) -> str:
-        date_out = req.date_from.isoformat()
-        date_in = req.return_from.isoformat() if req.return_from else ""
+    @staticmethod
+    def _build_booking_url(
+        outbound_route: FlightRoute,
+        adults: int,
+        children: int,
+        infants: int,
+        inbound_route: FlightRoute | None = None,
+    ) -> str:
+        outbound_segments = outbound_route.segments or []
+        if not outbound_segments:
+            return ""
+        origin = outbound_segments[0].origin
+        destination = outbound_segments[-1].destination
+        date_out = outbound_segments[0].departure.date().isoformat() if outbound_segments[0].departure else ""
+        date_in = ""
+        if inbound_route and inbound_route.segments:
+            inbound_departure = inbound_route.segments[0].departure
+            date_in = inbound_departure.date().isoformat() if inbound_departure else ""
         return (
             f"https://wizzair.com/en-gb#/booking/select-flight/"
-            f"{req.origin}/{req.destination}/{date_out}/{date_in}/"
-            f"{req.adults}/{req.children}/{req.infants}"
+            f"{origin}/{destination}/{date_out}/{date_in}/"
+            f"{adults}/{children}/{infants}"
         )
 
     def _empty(self, req: FlightSearchRequest) -> FlightSearchResponse:
@@ -431,7 +446,9 @@ class WizzairConnectorClient:
                     outbound=o.outbound, inbound=i.outbound,
                     airlines=list(dict.fromkeys(o.airlines + i.airlines)),
                     owner_airline=o.owner_airline,
-                    booking_url=o.booking_url, is_locked=False,
+                    booking_url=WizzairConnectorClient._build_booking_url(
+                        o.outbound, req.adults, req.children, req.infants, i.outbound,
+                    ), is_locked=False,
                     source=o.source, source_tier=o.source_tier,
                 ))
         combos.sort(key=lambda c: c.price)

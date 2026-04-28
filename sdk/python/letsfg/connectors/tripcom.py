@@ -73,6 +73,11 @@ class TripcomConnectorClient:
     ) -> FlightSearchResponse:
         ob_result = await self._search_ow(req)
         if req.return_from and ob_result.total_results > 0:
+            # When we navigate to the RT URL, _parse_ctrip already builds
+            # complete RT offers (total price + inbound leg). Combining again
+            # would double-count the return leg cost.
+            if any(o.inbound is not None for o in ob_result.offers):
+                return ob_result
             ib_req = req.model_copy(update={"origin": req.destination, "destination": req.origin, "date_from": req.return_from, "return_from": None})
             ib_result = await self._search_ow(ib_req)
             if ib_result.total_results > 0:

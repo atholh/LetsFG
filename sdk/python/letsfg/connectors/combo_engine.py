@@ -188,6 +188,10 @@ def build_combos(
             _rt_conds = dict(ob.conditions or {})
             _rt_conds["outbound_booking_url"] = ob.booking_url or ""
             _rt_conds["inbound_booking_url"] = rt.booking_url or ""
+            _rt_conds["outbound_price"] = f"{ob.price:.2f}"
+            _rt_conds["outbound_currency"] = ob.currency
+            _rt_conds["inbound_price"] = f"{rt.price:.2f}"
+            _rt_conds["inbound_currency"] = rt.currency
             return FlightOffer(
                 id=f"rt_{combo_hash}",
                 price=round(combo_price, 2),
@@ -221,6 +225,10 @@ def build_combos(
                 "inbound_booking_url": rt.booking_url or "",
                 "outbound_source": ob.source,
                 "inbound_source": rt.source,
+                "outbound_price": f"{ob.price:.2f}",
+                "outbound_currency": ob.currency,
+                "inbound_price": f"{rt.price:.2f}",
+                "inbound_currency": rt.currency,
             },
             booking_url="",
             is_locked=False,
